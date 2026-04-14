@@ -1,0 +1,4 @@
+/Users/lorenzobodmer/Desktop/Ideas/Rinnegan v3/chess-engine/build/CMakeFiles/engine.dir
+/Users/lorenzobodmer/Desktop/Ideas/Rinnegan v3/chess-engine/build/CMakeFiles/perft.dir
+/Users/lorenzobodmer/Desktop/Ideas/Rinnegan v3/chess-engine/build/CMakeFiles/edit_cache.dir
+/Users/lorenzobodmer/Desktop/Ideas/Rinnegan v3/chess-engine/build/CMakeFiles/rebuild_cache.dir
