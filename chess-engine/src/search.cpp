@@ -4,6 +4,8 @@
 #include <iostream>
 #include <algorithm>
 #include <cmath>
+#include <string>
+#include <vector>
 
 // ---------- Move ordering ----------
 
@@ -459,6 +461,67 @@ int Search::negamax(Position& pos, int alpha, int beta, int depth, int ply, bool
     return bestScore;
 }
 
+// ---------- PV extraction ----------
+
+// Walk the TT from the current position, playing each stored best move as
+// long as it's legal and unique along the line. Used only to produce the
+// `pv` field in UCI info output - must leave `pos` unchanged on return.
+static std::string buildPvFromTT(Position& pos, TranspositionTable& tt,
+                                 Move rootBest, int maxLen) {
+    std::string pv;
+    std::vector<Move> played;
+    std::vector<StateInfo> states(maxLen);
+    std::vector<uint64_t> seen;
+
+    auto tryPlay = [&](Move m) -> bool {
+        MoveList legal;
+        MoveGen::generateLegal(pos, legal);
+        for (int i = 0; i < legal.count; ++i) {
+            if (legal[i] == m) {
+                pos.makeMove(m, states[played.size()]);
+                played.push_back(m);
+                return true;
+            }
+        }
+        return false;
+    };
+
+    // Seed with the root's best move (guaranteed legal - it came from search).
+    if (!rootBest.data) return pv;
+    if (!tryPlay(rootBest)) return pv;
+    pv = rootBest.toUCI();
+    seen.push_back(pos.key());
+
+    for (int n = 1; n < maxLen; ++n) {
+        bool ttHit;
+        TTEntry* entry = tt.probe(pos.key(), ttHit);
+        if (!ttHit || !entry->bestMove.data) break;
+
+        Move next = entry->bestMove;
+        if (!tryPlay(next)) break;
+
+        // Cycle guard: if we re-enter a position already on the PV, stop.
+        uint64_t k = pos.key();
+        bool cycle = false;
+        for (uint64_t prev : seen) { if (prev == k) { cycle = true; break; } }
+        if (cycle) {
+            pos.unmakeMove(next);
+            played.pop_back();
+            break;
+        }
+        seen.push_back(k);
+
+        pv += ' ';
+        pv += next.toUCI();
+    }
+
+    // Roll back.
+    for (int i = (int)played.size() - 1; i >= 0; --i) {
+        pos.unmakeMove(played[i]);
+    }
+    return pv;
+}
+
 // ---------- Root ----------
 
 void Search::go(Position& pos, const SearchLimits& limits) {
@@ -513,8 +576,10 @@ void Search::go(Position& pos, const SearchLimits& limits) {
             std::cout << "cp " << bestScore;
         std::cout << " nodes " << info.nodes
                   << " nps " << nps
-                  << " time " << elapsed
-                  << std::endl;
+                  << " time " << elapsed;
+        std::string pv = buildPvFromTT(pos, tt, bestMove, depth);
+        if (!pv.empty()) std::cout << " pv " << pv;
+        std::cout << std::endl;
 
         // Stability: if the best move isn't changing across iterations we can
         // stop slightly earlier; if it just changed, give ourselves more time.
