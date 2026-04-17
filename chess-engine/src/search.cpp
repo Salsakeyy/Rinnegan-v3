@@ -228,16 +228,66 @@ int Search::negamax(Position& pos, int alpha, int beta, int depth, int ply, bool
     TTFlag ttFlag = TT_UPPER;
 
     for (int i = 0; i < moves.count; ++i) {
+        Move move = moves[i];
+
+        // Classify before making the move (pieceOn(to) reflects the captured piece)
+        Piece capturedBefore = pos.pieceOn(move.to());
+        bool isCapture = (capturedBefore != NO_PIECE) || (move.flag() == FLAG_ENPASSANT);
+        bool isPromotion = (move.flag() == FLAG_PROMOTION);
+        bool isKiller = (move == info.killers[ply][0] || move == info.killers[ply][1]);
+
         StateInfo st;
-        pos.makeMove(moves[i], st);
-        int score = -negamax(pos, -beta, -alpha, depth - 1, ply + 1, true);
-        pos.unmakeMove(moves[i]);
+        pos.makeMove(move, st);
+
+        // After makeMove, side-to-move flipped; inCheck() tells us whether our move gave check.
+        bool givesCheck = pos.inCheck();
+
+        int score;
+        int newDepth = depth - 1;
+
+        if (i == 0) {
+            // PVS: first move gets a full-window, full-depth search (the assumed PV).
+            score = -negamax(pos, -beta, -alpha, newDepth, ply + 1, true);
+        } else {
+            // Late Move Reductions: reduce depth for late quiet moves that are unlikely to beat alpha.
+            int R = 0;
+            bool lmrOk =
+                depth >= 3 &&
+                !inCheck &&
+                !givesCheck &&
+                !isCapture &&
+                !isPromotion &&
+                !isKiller &&
+                i >= (pvNode ? 4 : 2);
+
+            if (lmrOk) {
+                R = 1 + (depth >= 6 ? 1 : 0) + (i >= 6 ? 1 : 0);
+                if (pvNode) R = R > 0 ? R - 1 : 0;
+                if (R > newDepth - 1) R = newDepth - 1; // keep reduced depth >= 1
+                if (R < 0) R = 0;
+            }
+
+            // Scout: zero-window search at (possibly reduced) depth.
+            score = -negamax(pos, -alpha - 1, -alpha, newDepth - R, ply + 1, true);
+
+            // If a reduced search raises alpha, re-search at full depth (still zero-window).
+            if (!stopped.load() && R > 0 && score > alpha) {
+                score = -negamax(pos, -alpha - 1, -alpha, newDepth, ply + 1, true);
+            }
+
+            // On PV nodes, if the scout search lands strictly inside the window, re-search with the full window.
+            if (!stopped.load() && pvNode && score > alpha && score < beta) {
+                score = -negamax(pos, -beta, -alpha, newDepth, ply + 1, true);
+            }
+        }
+
+        pos.unmakeMove(move);
 
         if (stopped.load()) return 0;
 
         if (score > bestScore) {
             bestScore = score;
-            bestMove = moves[i];
+            bestMove = move;
 
             if (score > alpha) {
                 alpha = score;
@@ -247,13 +297,12 @@ int Search::negamax(Position& pos, int alpha, int beta, int depth, int ply, bool
                     ttFlag = TT_LOWER;
 
                     // Update killers and history for quiet moves
-                    Piece captured = pos.pieceOn(moves[i].to());
-                    if (captured == NO_PIECE && moves[i].flag() != FLAG_ENPASSANT) {
-                        if (info.killers[ply][0] != moves[i]) {
+                    if (!isCapture && !isPromotion) {
+                        if (info.killers[ply][0] != move) {
                             info.killers[ply][1] = info.killers[ply][0];
-                            info.killers[ply][0] = moves[i];
+                            info.killers[ply][0] = move;
                         }
-                        info.history[pos.sideToMove()][moves[i].from()][moves[i].to()] += depth * depth;
+                        info.history[pos.sideToMove()][move.from()][move.to()] += depth * depth;
                     }
                     break;
                 }

@@ -68,7 +68,7 @@ void loop() {
         ss >> cmd;
 
         if (cmd == "uci") {
-            std::cout << "id name Rinnegan v1" << std::endl;
+            std::cout << "id name Rinnegan v2" << std::endl;
             std::cout << "id author Lorenzo" << std::endl;
             std::cout << "option name Hash type spin default 16 min 1 max 1024" << std::endl;
             std::cout << "option name Threads type spin default 1 min 1 max 1" << std::endl;
@@ -104,14 +104,19 @@ void loop() {
                 ss >> token; // consume "moves" if present
             } else if (token == "fen") {
                 std::string fen;
-                // Read 6 FEN parts
+                // Read up to 6 FEN parts (or until "moves")
+                bool sawMoves = false;
                 for (int i = 0; i < 6 && ss >> token; ++i) {
-                    if (token == "moves") { break; }
+                    if (token == "moves") { sawMoves = true; break; }
                     if (!fen.empty()) fen += ' ';
                     fen += token;
                 }
                 pos.setFromFen(fen);
-                if (token != "moves") continue;
+                // If we didn't see "moves" yet, the next token (if any) must be "moves"
+                if (!sawMoves) {
+                    if (!(ss >> token)) continue;
+                    if (token != "moves") continue;
+                }
             }
 
             // Apply moves
