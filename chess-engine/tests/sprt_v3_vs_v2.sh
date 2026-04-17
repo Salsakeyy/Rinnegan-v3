@@ -93,5 +93,5 @@ else
         -sprt elo0=0 elo1=10 alpha=0.05 beta=0.05 \
         -draw movenumber=40 movecount=8 score=8 \
         -resign movecount=4 score=800 \
-        -pgnout "$PGN"
+        -pgnout file="$PGN"
 fi
