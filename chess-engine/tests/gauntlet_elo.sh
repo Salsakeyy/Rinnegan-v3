@@ -74,7 +74,16 @@ for i in "${!NAMES[@]}"; do
     elo="${ELOS[$i]}"
     cmd="${CMDS[$i]}"
     opts="${OPTS[$i]}"
-    [[ -x "$cmd" ]] || { echo "skipping $name: $cmd not executable"; continue; }
+    # Resolve bare command names via PATH (e.g. "stockfish" on macOS Homebrew).
+    if [[ ! -x "$cmd" ]]; then
+        resolved="$(command -v "$cmd" 2>/dev/null || true)"
+        if [[ -n "$resolved" && -x "$resolved" ]]; then
+            cmd="$resolved"
+        else
+            echo "skipping $name: $cmd not executable and not on PATH"
+            continue
+        fi
+    fi
 
     echo
     echo "-------------------------------------------------------------------"
