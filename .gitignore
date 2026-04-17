@@ -1,0 +1,11 @@
+# SPRT match binaries (built locally, platform-specific)
+chess-engine/build/engine_v1
+chess-engine/build/engine_v2
+
+# CMake state that varies by cmake version / platform
+chess-engine/build/CMakeFiles/3.*/
+chess-engine/build/CMakeFiles/4.*/
+chess-engine/build/CMakeFiles/*/compiler_depend.internal
+
+# fastchess auto-generated
+chess-engine/config.json
