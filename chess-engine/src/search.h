@@ -23,9 +23,16 @@ struct SearchInfo {
     int score = 0;
     int depth = 0;
     std::chrono::time_point<std::chrono::steady_clock> startTime;
-    int allocatedTime = 0; // ms
+    // Soft limit: break out of iterative deepening at end of iteration.
+    // Hard limit: abort search mid-iteration.
+    int softLimit = 0; // ms
+    int hardLimit = 0; // ms
     Move killers[MAX_PLY][2] = {};
     int history[2][64][64] = {};
+    // Counter-move heuristic: previous move's [color][from][to] -> expected reply.
+    Move counter[2][64][64] = {};
+    // Previous move in the search stack (used by counter-move indexing).
+    Move prevMoveStack[MAX_PLY] = {};
 };
 
 class Search {
@@ -35,13 +42,16 @@ public:
     void go(Position& pos, const SearchLimits& limits);
     void stop() { stopped.store(true); }
 
+    // One-time initialization (LMR table, etc).
+    static void init();
+
     std::atomic<bool> stopped{false};
 
 private:
     int negamax(Position& pos, int alpha, int beta, int depth, int ply, bool doNull);
     int quiescence(Position& pos, int alpha, int beta, int ply);
     void checkTime();
-    int allocateTime(const SearchLimits& limits, Color side);
+    void allocateTime(const SearchLimits& limits, Color side);
 
     TranspositionTable& tt;
     SearchInfo info;
