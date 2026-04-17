@@ -9,3 +9,6 @@ chess-engine/build/CMakeFiles/*/compiler_depend.internal
 
 # fastchess auto-generated
 chess-engine/config.json
+
+# Gauntlet harness per-run outputs (PGN + log per anchor)
+chess-engine/tests/gauntlet_results/
