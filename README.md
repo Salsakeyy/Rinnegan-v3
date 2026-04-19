@@ -11,6 +11,7 @@ null move, TT, killers/history/counter-moves, futility/LMP/RFP/razoring).
 | v1      | ~1900            | Baseline: bitboard movegen, alpha-beta, TT, qsearch |
 | v2      | ~2100 (10+0.1)   | +172 Elo vs v1 (SPRT). Added PVS + LMR, fixed FEN parsing |
 | **v3**  | **~2500+ (10+0.1)** | **+438 Elo vs v2 (SPRT, 162 games, LOS 100%, 141W / 3L / 18D)** |
+| v4      | target ~2800+    | Lazy SMP + NNUE integration, pending SPRT |
 
 v2's 2089 Elo was anchored vs Stockfish (UCI_Elo 1320–2500, 3+0.05, 150 rounds/anchor,
 combined inverse-variance-weighted estimate). v3 is +438 Elo over that baseline at
@@ -84,6 +85,37 @@ pawn-shield masks once at startup; it's wired from `main.cpp`.
 
 ---
 
+## v4 changelog
+
+### Search / threading (`src/search.cpp`, `src/thread.h`)
+
+- Added Lazy SMP with a shared TT and per-thread `ThreadData`.
+- Each worker owns its own `Position`, `StateInfo` stack, move-ordering tables,
+  and NNUE accumulator stack.
+- Thread `0` remains the main worker for UCI `info` output and wall-clock time
+  checks.
+- TT replacement now prefers exact scores slightly harder under SMP races, and
+  probed TT moves are guarded before use.
+
+### NNUE (`src/nnue.h`, `src/nnue.cpp`)
+
+- Added support for Bullet / Akimbo-style `(768 -> 768) x 2 -> 1` SCReLU nets.
+- Loader expects raw int16 weights on disk and falls back to PeSTO if loading
+  fails or the net size is wrong.
+- Search keeps a per-ply accumulator stack and updates it incrementally across
+  quiet moves, captures, en passant, castling, and promotions.
+
+### Eval / UCI / tooling
+
+- `Eval::evaluate(pos, acc)` now dispatches to NNUE when a net is loaded and
+  `UseNNUE=true`, otherwise it preserves the v3 classical evaluator.
+- New UCI options: `Threads`, `EvalFile`, and `UseNNUE`.
+- Added `bench` to search 16 fixed positions at depth 13 and report aggregate
+  nodes / NPS.
+- Added `tests/sprt_v4_vs_v3.sh` for the v4-vs-v3 SPRT gate.
+
+---
+
 ## How the engine is structured
 
 ```
@@ -110,10 +142,13 @@ cmake --build build -j
 ./build/perft         # move-gen correctness (6 standard positions)
 ```
 
+Default NNUE path is `./rinnegan-v4.net`. If the net lives elsewhere, point the
+engine at it with `setoption name EvalFile value /path/to/net`.
+
 ## Testing
 
-- `tests/sprt_v2_vs_v1.sh`, `tests/sprt_v3_vs_v2.sh` — SPRT matches, bounds
-  `[0, 10]` at TC 10+0.1, via `cutechess-cli` or `fastchess`.
+- `tests/sprt_v2_vs_v1.sh`, `tests/sprt_v3_vs_v2.sh`,
+  `tests/sprt_v4_vs_v3.sh` — SPRT matches via `cutechess-cli` or `fastchess`.
 - `tests/gauntlet_elo.sh` — absolute Elo estimate by playing vs Stockfish at
   several `UCI_Elo` anchors (`anchors.conf`). Uses inverse-variance weighting
   to combine anchors. Requires `stockfish` on PATH.

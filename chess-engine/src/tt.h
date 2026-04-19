@@ -1,5 +1,6 @@
 #pragma once
 
+#include "position.h"
 #include "types.h"
 #include <cstdint>
 #include <cstring>
@@ -14,11 +15,18 @@ enum TTFlag : uint8_t {
 struct TTEntry {
     uint32_t key32 = 0;
     int16_t score = 0;
-    int16_t staticEval = 0;
+    int16_t staticEval = SCORE_NONE;
     Move bestMove = MOVE_NONE;
     uint8_t depth = 0;
     uint8_t flag = TT_NONE;
 };
+
+inline bool ttMoveIsUsable(const Position& pos, Move move) {
+    if (!move) return true;
+
+    Piece fromPiece = pos.pieceOn(move.from());
+    return fromPiece != NO_PIECE && pieceColor(fromPiece) == pos.sideToMove();
+}
 
 class TranspositionTable {
 public:
@@ -44,8 +52,10 @@ public:
 
     void store(uint64_t key, int score, TTFlag flag, int depth, Move bestMove, int staticEval) {
         TTEntry* entry = &table[key % numEntries];
-        // Always replace if new depth >= stored depth or different position
-        if (entry->key32 != uint32_t(key >> 32) || depth >= entry->depth || flag == TT_EXACT) {
+        int newPriority = depth * 2 + (flag == TT_EXACT ? 1 : 0);
+        int oldPriority = int(entry->depth) * 2 + (entry->flag == TT_EXACT ? 1 : 0);
+
+        if (entry->key32 != uint32_t(key >> 32) || newPriority >= oldPriority) {
             entry->key32 = uint32_t(key >> 32);
             entry->score = int16_t(score);
             entry->staticEval = int16_t(staticEval);

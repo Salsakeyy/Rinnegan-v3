@@ -67,6 +67,11 @@ uint64_t Position::computeKey() const {
 }
 
 void Position::setFromFen(const std::string& fen) {
+    thread_local StateInfo rootState;
+    setFromFen(fen, rootState);
+}
+
+void Position::setFromFen(const std::string& fen, StateInfo& rootState) {
     std::fill(std::begin(mailbox), std::end(mailbox), NO_PIECE);
     std::memset(byType, 0, sizeof(byType));
     std::memset(byColor, 0, sizeof(byColor));
@@ -107,10 +112,8 @@ void Position::setFromFen(const std::string& fen) {
 
     side = (sideStr == "b") ? BLACK : WHITE;
 
-    // We need a StateInfo
-    static StateInfo rootSt;
-    rootSt = StateInfo{};
-    st = &rootSt;
+    rootState = StateInfo{};
+    st = &rootState;
 
     // Castling
     st->castling = NO_CASTLING;
@@ -140,6 +143,20 @@ void Position::setFromFen(const std::string& fen) {
 
     st->key = computeKey();
     keyHistory.push_back(st->key);
+}
+
+void Position::copyFrom(const Position& other, StateInfo& rootState) {
+    std::memcpy(byType, other.byType, sizeof(byType));
+    std::memcpy(byColor, other.byColor, sizeof(byColor));
+    std::memcpy(mailbox, other.mailbox, sizeof(mailbox));
+
+    side = other.side;
+    fullmoveNumber = other.fullmoveNumber;
+    keyHistory = other.keyHistory;
+
+    rootState = other.st ? *other.st : StateInfo{};
+    rootState.previous = nullptr;
+    st = &rootState;
 }
 
 std::string Position::fen() const {

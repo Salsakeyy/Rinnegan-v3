@@ -1,5 +1,7 @@
 #include "eval.h"
 #include "bitboard.h"
+#include "nnue.h"
+#include "uci.h"
 #include <algorithm>
 
 namespace Eval {
@@ -392,7 +394,7 @@ static inline int pawnShieldBonusFor(const Position& pos, Color us) {
     return shieldPawns * pawnShieldBonus;
 }
 
-int evaluate(const Position& pos) {
+int evaluateClassical(const Position& pos) {
     int mgScore[2] = { 0, 0 };
     int egScore[2] = { 0, 0 };
     int phase = 0;
@@ -454,6 +456,17 @@ int evaluate(const Position& pos) {
     score += 10;
 
     return (pos.sideToMove() == WHITE) ? score : -score;
+}
+
+int evaluate(const Position& pos) {
+    return evaluateClassical(pos);
+}
+
+int evaluate(const Position& pos, const NNUE::Accumulator* acc) {
+    if (acc && NNUE::isLoaded() && UCI::useNNUE)
+        return NNUE::evaluate(*acc, pos.sideToMove());
+
+    return evaluateClassical(pos);
 }
 
 } // namespace Eval
