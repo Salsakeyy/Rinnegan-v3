@@ -9,6 +9,8 @@ public:
     Position();
 
     void setFromFen(const std::string& fen);
+    void setFromFen(const std::string& fen, StateInfo& rootState);
+    void copyFrom(const Position& other, StateInfo& rootState);
     std::string fen() const;
 
     // Board queries
