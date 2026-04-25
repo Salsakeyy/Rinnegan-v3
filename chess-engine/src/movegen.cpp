@@ -23,6 +23,9 @@ void generatePseudoLegal(const Position& pos, MoveList& list) {
     Color them = ~us;
     Bitboard ourPieces = pos.pieces(us);
     Bitboard theirPieces = pos.pieces(them);
+    Bitboard theirKing = pos.pieces(them, KING);
+    Bitboard captureTargets = theirPieces & ~theirKing;
+    Bitboard nonKingTargets = ~ourPieces & ~theirKing;
     Bitboard occ = pos.allPieces();
     Bitboard empty = ~occ;
 
@@ -49,11 +52,11 @@ void generatePseudoLegal(const Position& pos, MoveList& list) {
         // Captures
         Bitboard leftAttacks, rightAttacks;
         if (us == WHITE) {
-            leftAttacks  = (pawns & ~FileABB) << 7 & theirPieces;
-            rightAttacks = (pawns & ~FileHBB) << 9 & theirPieces;
+            leftAttacks  = (pawns & ~FileABB) << 7 & captureTargets;
+            rightAttacks = (pawns & ~FileHBB) << 9 & captureTargets;
         } else {
-            leftAttacks  = (pawns & ~FileHBB) >> 7 & theirPieces;
-            rightAttacks = (pawns & ~FileABB) >> 9 & theirPieces;
+            leftAttacks  = (pawns & ~FileHBB) >> 7 & captureTargets;
+            rightAttacks = (pawns & ~FileABB) >> 9 & captureTargets;
         }
         while (leftAttacks) {
             Square to = BB::poplsb(leftAttacks);
@@ -82,7 +85,7 @@ void generatePseudoLegal(const Position& pos, MoveList& list) {
         Bitboard knights = pos.pieces(us, KNIGHT);
         while (knights) {
             Square from = BB::poplsb(knights);
-            Bitboard targets = BB::KnightAttacks[from] & ~ourPieces;
+            Bitboard targets = BB::KnightAttacks[from] & nonKingTargets;
             while (targets) {
                 Square to = BB::poplsb(targets);
                 list.add(Move::make(from, to));
@@ -95,7 +98,7 @@ void generatePseudoLegal(const Position& pos, MoveList& list) {
         Bitboard bishops = pos.pieces(us, BISHOP);
         while (bishops) {
             Square from = BB::poplsb(bishops);
-            Bitboard targets = BB::bishopAttacks(from, occ) & ~ourPieces;
+            Bitboard targets = BB::bishopAttacks(from, occ) & nonKingTargets;
             while (targets) {
                 Square to = BB::poplsb(targets);
                 list.add(Move::make(from, to));
@@ -108,7 +111,7 @@ void generatePseudoLegal(const Position& pos, MoveList& list) {
         Bitboard rooks = pos.pieces(us, ROOK);
         while (rooks) {
             Square from = BB::poplsb(rooks);
-            Bitboard targets = BB::rookAttacks(from, occ) & ~ourPieces;
+            Bitboard targets = BB::rookAttacks(from, occ) & nonKingTargets;
             while (targets) {
                 Square to = BB::poplsb(targets);
                 list.add(Move::make(from, to));
@@ -121,7 +124,7 @@ void generatePseudoLegal(const Position& pos, MoveList& list) {
         Bitboard queens = pos.pieces(us, QUEEN);
         while (queens) {
             Square from = BB::poplsb(queens);
-            Bitboard targets = BB::queenAttacks(from, occ) & ~ourPieces;
+            Bitboard targets = BB::queenAttacks(from, occ) & nonKingTargets;
             while (targets) {
                 Square to = BB::poplsb(targets);
                 list.add(Move::make(from, to));
@@ -132,42 +135,44 @@ void generatePseudoLegal(const Position& pos, MoveList& list) {
     // King
     {
         Square ksq = pos.kingSq(us);
-        Bitboard targets = BB::KingAttacks[ksq] & ~ourPieces;
-        while (targets) {
-            Square to = BB::poplsb(targets);
-            list.add(Move::make(ksq, to));
-        }
+        if (ksq != NO_SQUARE) {
+            Bitboard targets = BB::KingAttacks[ksq] & nonKingTargets;
+            while (targets) {
+                Square to = BB::poplsb(targets);
+                list.add(Move::make(ksq, to));
+            }
 
-        // Castling
-        if (us == WHITE) {
-            if ((pos.castlingRights() & WHITE_OO) &&
-                !(occ & (squareBB(F1) | squareBB(G1))) &&
-                !pos.isSquareAttacked(E1, them) &&
-                !pos.isSquareAttacked(F1, them) &&
-                !pos.isSquareAttacked(G1, them)) {
-                list.add(Move::make(E1, G1, FLAG_CASTLING));
-            }
-            if ((pos.castlingRights() & WHITE_OOO) &&
-                !(occ & (squareBB(B1) | squareBB(C1) | squareBB(D1))) &&
-                !pos.isSquareAttacked(E1, them) &&
-                !pos.isSquareAttacked(C1, them) &&
-                !pos.isSquareAttacked(D1, them)) {
-                list.add(Move::make(E1, C1, FLAG_CASTLING));
-            }
-        } else {
-            if ((pos.castlingRights() & BLACK_OO) &&
-                !(occ & (squareBB(F8) | squareBB(G8))) &&
-                !pos.isSquareAttacked(E8, them) &&
-                !pos.isSquareAttacked(F8, them) &&
-                !pos.isSquareAttacked(G8, them)) {
-                list.add(Move::make(E8, G8, FLAG_CASTLING));
-            }
-            if ((pos.castlingRights() & BLACK_OOO) &&
-                !(occ & (squareBB(B8) | squareBB(C8) | squareBB(D8))) &&
-                !pos.isSquareAttacked(E8, them) &&
-                !pos.isSquareAttacked(C8, them) &&
-                !pos.isSquareAttacked(D8, them)) {
-                list.add(Move::make(E8, C8, FLAG_CASTLING));
+            // Castling
+            if (us == WHITE) {
+                if ((pos.castlingRights() & WHITE_OO) &&
+                    !(occ & (squareBB(F1) | squareBB(G1))) &&
+                    !pos.isSquareAttacked(E1, them) &&
+                    !pos.isSquareAttacked(F1, them) &&
+                    !pos.isSquareAttacked(G1, them)) {
+                    list.add(Move::make(E1, G1, FLAG_CASTLING));
+                }
+                if ((pos.castlingRights() & WHITE_OOO) &&
+                    !(occ & (squareBB(B1) | squareBB(C1) | squareBB(D1))) &&
+                    !pos.isSquareAttacked(E1, them) &&
+                    !pos.isSquareAttacked(C1, them) &&
+                    !pos.isSquareAttacked(D1, them)) {
+                    list.add(Move::make(E1, C1, FLAG_CASTLING));
+                }
+            } else {
+                if ((pos.castlingRights() & BLACK_OO) &&
+                    !(occ & (squareBB(F8) | squareBB(G8))) &&
+                    !pos.isSquareAttacked(E8, them) &&
+                    !pos.isSquareAttacked(F8, them) &&
+                    !pos.isSquareAttacked(G8, them)) {
+                    list.add(Move::make(E8, G8, FLAG_CASTLING));
+                }
+                if ((pos.castlingRights() & BLACK_OOO) &&
+                    !(occ & (squareBB(B8) | squareBB(C8) | squareBB(D8))) &&
+                    !pos.isSquareAttacked(E8, them) &&
+                    !pos.isSquareAttacked(C8, them) &&
+                    !pos.isSquareAttacked(D8, them)) {
+                    list.add(Move::make(E8, C8, FLAG_CASTLING));
+                }
             }
         }
     }
@@ -195,6 +200,7 @@ void generateCaptures(const Position& pos, MoveList& list) {
     Color them = ~us;
     Bitboard ourPieces = pos.pieces(us);
     Bitboard theirPieces = pos.pieces(them);
+    Bitboard captureTargets = theirPieces & ~pos.pieces(them, KING);
     Bitboard occ = pos.allPieces();
 
     // Pawn captures + promotions
@@ -205,11 +211,11 @@ void generateCaptures(const Position& pos, MoveList& list) {
         // Captures
         Bitboard leftAttacks, rightAttacks;
         if (us == WHITE) {
-            leftAttacks  = (pawns & ~FileABB) << 7 & theirPieces;
-            rightAttacks = (pawns & ~FileHBB) << 9 & theirPieces;
+            leftAttacks  = (pawns & ~FileABB) << 7 & captureTargets;
+            rightAttacks = (pawns & ~FileHBB) << 9 & captureTargets;
         } else {
-            leftAttacks  = (pawns & ~FileHBB) >> 7 & theirPieces;
-            rightAttacks = (pawns & ~FileABB) >> 9 & theirPieces;
+            leftAttacks  = (pawns & ~FileHBB) >> 7 & captureTargets;
+            rightAttacks = (pawns & ~FileABB) >> 9 & captureTargets;
         }
         while (leftAttacks) {
             Square to = BB::poplsb(leftAttacks);
@@ -265,7 +271,7 @@ void generateCaptures(const Position& pos, MoveList& list) {
         Bitboard knights = pos.pieces(us, KNIGHT);
         while (knights) {
             Square from = BB::poplsb(knights);
-            Bitboard targets = BB::KnightAttacks[from] & theirPieces;
+            Bitboard targets = BB::KnightAttacks[from] & captureTargets;
             while (targets) {
                 list.add(Move::make(from, BB::poplsb(targets)));
             }
@@ -277,7 +283,7 @@ void generateCaptures(const Position& pos, MoveList& list) {
         Bitboard bishops = pos.pieces(us, BISHOP);
         while (bishops) {
             Square from = BB::poplsb(bishops);
-            Bitboard targets = BB::bishopAttacks(from, occ) & theirPieces;
+            Bitboard targets = BB::bishopAttacks(from, occ) & captureTargets;
             while (targets) {
                 list.add(Move::make(from, BB::poplsb(targets)));
             }
@@ -289,7 +295,7 @@ void generateCaptures(const Position& pos, MoveList& list) {
         Bitboard rooks = pos.pieces(us, ROOK);
         while (rooks) {
             Square from = BB::poplsb(rooks);
-            Bitboard targets = BB::rookAttacks(from, occ) & theirPieces;
+            Bitboard targets = BB::rookAttacks(from, occ) & captureTargets;
             while (targets) {
                 list.add(Move::make(from, BB::poplsb(targets)));
             }
@@ -301,7 +307,7 @@ void generateCaptures(const Position& pos, MoveList& list) {
         Bitboard queens = pos.pieces(us, QUEEN);
         while (queens) {
             Square from = BB::poplsb(queens);
-            Bitboard targets = BB::queenAttacks(from, occ) & theirPieces;
+            Bitboard targets = BB::queenAttacks(from, occ) & captureTargets;
             while (targets) {
                 list.add(Move::make(from, BB::poplsb(targets)));
             }
@@ -311,9 +317,11 @@ void generateCaptures(const Position& pos, MoveList& list) {
     // King captures
     {
         Square ksq = pos.kingSq(us);
-        Bitboard targets = BB::KingAttacks[ksq] & theirPieces;
-        while (targets) {
-            list.add(Move::make(ksq, BB::poplsb(targets)));
+        if (ksq != NO_SQUARE) {
+            Bitboard targets = BB::KingAttacks[ksq] & captureTargets;
+            while (targets) {
+                list.add(Move::make(ksq, BB::poplsb(targets)));
+            }
         }
     }
 

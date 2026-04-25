@@ -207,10 +207,13 @@ std::string Position::fen() const {
 }
 
 Square Position::kingSq(Color c) const {
-    return BB::lsb(pieces(c, KING));
+    Bitboard kings = pieces(c, KING);
+    return kings ? BB::lsb(kings) : NO_SQUARE;
 }
 
 Bitboard Position::attackersTo(Square s, Bitboard occ) const {
+    if (s == NO_SQUARE) return 0;
+
     return (BB::PawnAttacks[BLACK][s] & pieces(WHITE, PAWN))
          | (BB::PawnAttacks[WHITE][s] & pieces(BLACK, PAWN))
          | (BB::KnightAttacks[s]      & pieces(KNIGHT))
@@ -220,6 +223,8 @@ Bitboard Position::attackersTo(Square s, Bitboard occ) const {
 }
 
 bool Position::isSquareAttacked(Square s, Color by) const {
+    if (s == NO_SQUARE) return false;
+
     Bitboard occ = allPieces();
     return (BB::PawnAttacks[~by][s] & pieces(by, PAWN))
          | (BB::KnightAttacks[s]    & pieces(by, KNIGHT))

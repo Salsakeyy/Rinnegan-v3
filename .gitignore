@@ -12,3 +12,16 @@ chess-engine/config.json
 
 # Gauntlet harness per-run outputs (PGN + log per anchor)
 chess-engine/tests/gauntlet_results/
+
+# Out-of-tree build dirs (PGO orchestration, alternate configs)
+chess-engine/build-pgo/
+chess-engine/build-pgo-final/
+chess-engine/build-nolto/
+
+# Standalone binaries produced by tools/openbench-build.sh
+chess-engine/rinnegan
+chess-engine/rinnegan-*
+
+# macOS noise
+.DS_Store
+**/.DS_Store

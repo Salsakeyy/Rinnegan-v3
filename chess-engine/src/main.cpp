@@ -5,6 +5,8 @@
 #include "search.h"
 #include "uci.h"
 
+// Bench signature: 5895645 nodes at depth 13. Source of truth: BENCH_SIGNATURE in src/uci.cpp.
+
 int main() {
     BB::init();
     Magics::init();
