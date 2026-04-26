@@ -27,6 +27,7 @@ struct ThreadData {
     StateInfo stateStack[STATE_STACK_SIZE] = {};
     NNUE::Accumulator accStack[ACC_STACK_SIZE] = {};
     int accIdx = 0;
+    int staticEvalStack[MAX_PLY] = {};
     Move killers[MAX_PLY][2] = {};
     int history[2][64][64] = {};
     Move counter[2][64][64] = {};

@@ -347,7 +347,7 @@ int Search::quiescence(ThreadData& td, int alpha, int beta, int ply) {
 
 // ---------- Main negamax ----------
 
-int Search::negamax(ThreadData& td, int alpha, int beta, int depth, int ply, bool doNull) {
+int Search::negamax(ThreadData& td, int alpha, int beta, int depth, int ply, bool doNull, bool cutNode) {
     Position& pos = td.pos;
 
     if (shared.stopped.load(std::memory_order_relaxed))
@@ -406,11 +406,21 @@ int Search::negamax(ThreadData& td, int alpha, int beta, int depth, int ply, boo
     } else {
         staticEval = Eval::evaluate(pos, currentAccumulator(td));
     }
+    td.staticEvalStack[ply] = staticEval;
+
+    // Improving: side-to-move's static eval increased compared to two plies
+    // ago (same side). Treats prior in-check ply as non-improving.
+    bool improving = false;
+    if (!inCheck && ply >= 2 && staticEval != SCORE_NONE) {
+        int prev = td.staticEvalStack[ply - 2];
+        if (prev != SCORE_NONE)
+            improving = staticEval > prev;
+    }
 
     bool prunable = !pvNode && !inCheck && staticEval != SCORE_NONE;
 
     if (prunable && depth <= 6) {
-        int margin = 80 * depth;
+        int margin = (improving ? 60 : 80) * depth;
         if (staticEval - margin >= beta)
             return staticEval;
     }
@@ -437,7 +447,7 @@ int Search::negamax(ThreadData& td, int alpha, int beta, int depth, int ply, boo
             }
 
             pos.doNullMove(td.stateStack[ply]);
-            int nullScore = -negamax(td, -beta, -beta + 1, depth - reduction - 1, ply + 1, false);
+            int nullScore = -negamax(td, -beta, -beta + 1, depth - reduction - 1, ply + 1, false, !cutNode);
             pos.undoNullMove();
             if (td.useNNUE) popAccumulator(td);
 
@@ -447,6 +457,11 @@ int Search::negamax(ThreadData& td, int alpha, int beta, int depth, int ply, boo
                 return beta;
         }
     }
+
+    // Internal Iterative Reduction: at expected PV/cut nodes without a TT
+    // move, reduce depth by 1 to encourage IID-style search ordering. (V5.3)
+    if ((pvNode || cutNode) && depth >= 4 && ttMove == MOVE_NONE)
+        depth--;
 
     MoveList moves;
     MoveGen::generateLegal(pos, moves);
@@ -479,10 +494,11 @@ int Search::negamax(ThreadData& td, int alpha, int beta, int depth, int ply, boo
         bool isQuiet = !isCapture && !isPromotion;
 
         if (isQuiet && !pvNode && !inCheck && bestScore > -SCORE_MATE_IN_MAX_PLY) {
-            if (depth <= 4 && i >= 3 + depth * depth)
+            int lmpThreshold = (improving ? 4 : 2) + depth * depth;
+            if (depth <= 4 && i >= lmpThreshold)
                 continue;
             if (depth <= 3 && staticEval != SCORE_NONE &&
-                staticEval + 90 + 80 * depth <= alpha)
+                staticEval + 90 + (improving ? 60 : 80) * depth <= alpha)
                 continue;
             // SEE quiet pruning: skip moves that move into clearly losing exchanges. (V5.2)
             if (depth <= 7 && !SEE::seeGE(pos, move, -60 * depth))
@@ -511,7 +527,7 @@ int Search::negamax(ThreadData& td, int alpha, int beta, int depth, int ply, boo
         int score;
 
         if (i == 0) {
-            score = -negamax(td, -beta, -alpha, newDepth, ply + 1, true);
+            score = -negamax(td, -beta, -alpha, newDepth, ply + 1, true, pvNode ? false : !cutNode);
         } else {
             int reduction = 0;
             bool lmrOk =
@@ -526,19 +542,20 @@ int Search::negamax(ThreadData& td, int alpha, int beta, int depth, int ply, boo
             if (lmrOk) {
                 reduction = lmrTable[std::min(depth, MAX_PLY)][std::min(i, MAX_MOVES - 1)];
                 if (pvNode && reduction > 0) reduction -= 1;
+                if (!improving) reduction += 1;
                 reduction = std::max(0, std::min(reduction, newDepth - 1));
             }
 
-            score = -negamax(td, -alpha - 1, -alpha, newDepth - reduction, ply + 1, true);
+            score = -negamax(td, -alpha - 1, -alpha, newDepth - reduction, ply + 1, true, !cutNode);
 
             if (!shared.stopped.load(std::memory_order_relaxed) &&
                 reduction > 0 && score > alpha) {
-                score = -negamax(td, -alpha - 1, -alpha, newDepth, ply + 1, true);
+                score = -negamax(td, -alpha - 1, -alpha, newDepth, ply + 1, true, !cutNode);
             }
 
             if (!shared.stopped.load(std::memory_order_relaxed) &&
                 pvNode && score > alpha && score < beta) {
-                score = -negamax(td, -beta, -alpha, newDepth, ply + 1, true);
+                score = -negamax(td, -beta, -alpha, newDepth, ply + 1, true, false);
             }
         }
 
@@ -625,20 +642,32 @@ void Search::workerLoop(ThreadData& td) {
 
         int alpha = -SCORE_INF;
         int beta = SCORE_INF;
+        int delta = 10;
         if (depth >= 5 && td.completedDepth > 0) {
-            alpha = td.bestScore - 30;
-            beta = td.bestScore + 30;
+            alpha = std::max(-SCORE_INF, td.bestScore - delta);
+            beta  = std::min( SCORE_INF, td.bestScore + delta);
         }
 
-        int score = negamax(td, alpha, beta, depth, 0, true);
-        if (shared.stopped.load(std::memory_order_relaxed))
-            break;
-
-        if (score <= alpha || score >= beta) {
-            score = negamax(td, -SCORE_INF, SCORE_INF, depth, 0, true);
+        // Graduated aspiration widening: on fail, widen by ~50% and retry,
+        // halving alpha towards bestScore on fail-low. (V5.3)
+        int score;
+        while (true) {
+            score = negamax(td, alpha, beta, depth, 0, true, false);
             if (shared.stopped.load(std::memory_order_relaxed))
                 break;
+
+            if (score <= alpha) {
+                beta = (alpha + beta) / 2;
+                alpha = std::max(-SCORE_INF, alpha - delta);
+            } else if (score >= beta) {
+                beta = std::min(SCORE_INF, beta + delta);
+            } else {
+                break;
+            }
+            delta += delta / 2;
         }
+        if (shared.stopped.load(std::memory_order_relaxed))
+            break;
 
         td.bestScore = score;
         td.completedDepth = depth;

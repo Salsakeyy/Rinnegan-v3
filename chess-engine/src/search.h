@@ -14,7 +14,7 @@ public:
     int64_t lastNodes() const { return lastNodes_; }
 
 private:
-    int negamax(ThreadData& td, int alpha, int beta, int depth, int ply, bool doNull);
+    int negamax(ThreadData& td, int alpha, int beta, int depth, int ply, bool doNull, bool cutNode);
     int quiescence(ThreadData& td, int alpha, int beta, int ply);
     bool onNode(ThreadData& td, int ply);
     void workerLoop(ThreadData& td);
