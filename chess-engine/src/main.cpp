@@ -5,7 +5,7 @@
 #include "search.h"
 #include "uci.h"
 
-// Bench signature: 5895645 nodes at depth 13. Source of truth: BENCH_SIGNATURE in src/uci.cpp.
+// Bench signature: 3532461 nodes at depth 13. Source of truth: BENCH_SIGNATURE in src/uci.cpp.
 
 int main() {
     BB::init();

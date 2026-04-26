@@ -24,7 +24,7 @@ namespace {
 
 // Golden bench node count at kBenchDepth. Re-pin after any patch that
 // changes node visit order. CI greps `BENCH_SIGNATURE` to verify.
-constexpr int64_t BENCH_SIGNATURE = 5895645;
+constexpr int64_t BENCH_SIGNATURE = 3532461;
 
 constexpr const char* StartPosFen =
     "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";

@@ -22,6 +22,7 @@ set(ENGINE_SOURCES
     src/eval.cpp
     src/nnue.cpp
     src/perft.cpp
+    src/see.cpp
     src/search.cpp
     src/uci.cpp
 )

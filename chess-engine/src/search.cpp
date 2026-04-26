@@ -1,6 +1,7 @@
 #include "search.h"
 #include "eval.h"
 #include "movegen.h"
+#include "see.h"
 #include "uci.h"
 #include <algorithm>
 #include <cassert>
@@ -307,6 +308,13 @@ int Search::quiescence(ThreadData& td, int alpha, int beta, int ply) {
         Piece movedPiece = pos.pieceOn(move.from());
         Piece capturedPiece = (move.flag() == FLAG_ENPASSANT) ? makePiece(~us, PAWN) : pos.pieceOn(move.to());
 
+        // SEE pruning: when stand-pat + captured-value can't reach alpha, skip
+        // captures that lose more than 50cp by static exchange. (V5.2)
+        int capForPrune = (capturedPiece != NO_PIECE) ? SEE::PieceValue[pieceType(capturedPiece)] : 0;
+        if (standPat + capForPrune + 200 <= alpha &&
+            !SEE::seeGE(pos, move, -50))
+            continue;
+
         if (td.useNNUE) {
             if (td.accIdx + 1 >= ThreadData::ACC_STACK_SIZE)
                 break;
@@ -476,7 +484,17 @@ int Search::negamax(ThreadData& td, int alpha, int beta, int depth, int ply, boo
             if (depth <= 3 && staticEval != SCORE_NONE &&
                 staticEval + 90 + 80 * depth <= alpha)
                 continue;
+            // SEE quiet pruning: skip moves that move into clearly losing exchanges. (V5.2)
+            if (depth <= 7 && !SEE::seeGE(pos, move, -60 * depth))
+                continue;
         }
+
+        // SEE capture pruning: at low depth, drop late captures that lose
+        // material by static exchange. (V5.2)
+        if (isCapture && !pvNode && !inCheck && depth <= 8 &&
+            bestScore > -SCORE_MATE_IN_MAX_PLY &&
+            !SEE::seeGE(pos, move, -30 * depth))
+            continue;
 
         if (td.useNNUE) {
             if (td.accIdx + 1 >= ThreadData::ACC_STACK_SIZE)
