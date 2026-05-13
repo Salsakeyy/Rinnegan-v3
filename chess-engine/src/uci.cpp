@@ -40,7 +40,7 @@ namespace {
 
 // Golden bench node count at kBenchDepth. Re-pin after any patch that
 // changes node visit order. CI greps `BENCH_SIGNATURE` to verify.
-constexpr int64_t BENCH_SIGNATURE = 3136877;
+constexpr int64_t BENCH_SIGNATURE = 2782066;
 
 constexpr const char* StartPosFen =
     "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
@@ -322,7 +322,7 @@ void loop() {
         ss >> cmd;
 
         if (cmd == "uci") {
-            std::cout << "id name Rinnegan v5.3" << std::endl;
+            std::cout << "id name Rinnegan v7" << std::endl;
             std::cout << "id author Lorenzo" << std::endl;
             std::cout << "option name Hash type spin default 16 min 1 max 65536" << std::endl;
             std::cout << "option name Clear Hash type button" << std::endl;

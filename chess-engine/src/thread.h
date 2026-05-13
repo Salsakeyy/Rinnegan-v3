@@ -31,6 +31,23 @@ struct ThreadData {
     int history[2][64][64] = {};
     Move counter[2][64][64] = {};
     Move prevMoveStack[MAX_PLY] = {};
+    // (V7) Piece moved at each ply — mirrors prevMoveStack but stores the
+    // piece-type-and-color, since the board has already moved when we look
+    // it up in the child node. Used as contHist's "previous" key.
+    Piece movedPieceStack[MAX_PLY] = {};
+    // (V7) 1-ply continuation history. [prevPiece][prevTo][curPiece][curTo].
+    // Index 12 (NO_PIECE) reserved for "no previous move".
+    int16_t contHist[13][64][13][64] = {};
+    // (V7) Capture history keyed by (movedPiece, toSq, capturedPT). Used to
+    // disambiguate captures with identical MVV-LVA.
+    int16_t captHist[13][64][7] = {};
+    // (V7) Excluded move per ply for singular-extension search. MOVE_NONE
+    // when not in a singular sub-search.
+    Move excludedMoveStack[MAX_PLY] = {};
+    // (V7) Per-root-move node accounting. Index matches the root move list
+    // order. Used by the dynamic time manager to weight by node share of
+    // the best root move.
+    int64_t rootMoveNodes[MAX_MOVES] = {};
     int64_t nodes = 0;
     int selDepth = 0;
     int threadId = 0;
@@ -39,6 +56,11 @@ struct ThreadData {
     int completedDepth = 0;
     int stableIters = 0;
     Move prevBest = MOVE_NONE;
+    // (V7) Best-move-changes tracker (decays each iteration).
+    int bestMoveChanges = 0;
+    // (V7) Index of bestMove in the current iteration's root move list,
+    // used to weight time by best-move node share.
+    int bestRootIdx = 0;
 };
 
 struct SearchShared {

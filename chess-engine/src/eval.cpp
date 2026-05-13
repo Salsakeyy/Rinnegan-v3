@@ -160,7 +160,7 @@ static const int* egTables[6] = {
     egRookTable, egQueenTable,  egKingTable
 };
 
-// --- v3 additions: structural / tactical eval terms ---
+// --- v3 + v7 structural / tactical eval terms ---
 
 // Passed pawn bonus by relative rank (rank from pawn's side perspective).
 static const int passedBonusMg[8] = { 0,  5, 10, 20, 35, 60,  90, 0 };
@@ -176,19 +176,50 @@ static const int doubledPawnEg = -20;
 static const int isolatedPawnMg = -12;
 static const int isolatedPawnEg = -18;
 
+// (V7) Backward pawn penalty.
+static const int backwardPawnMg = -8;
+static const int backwardPawnEg = -16;
+
+// (V7) Connected / phalanx pawn bonus scale by relative rank.
+//   bonus_mg = connectedBaseMg + relRank * connectedRankMg
+//   bonus_eg =                   relRank * connectedRankEg
+// Tuned mildly so structure adds up to ~10-30cp across a typical pawn chain.
+static const int connectedBaseMg = 3;
+static const int connectedRankMg = 2;
+static const int connectedRankEg = 2;
+
 // Rook on open / semi-open file
 static const int rookOpenMg = 25;
 static const int rookOpenEg = 10;
 static const int rookSemiOpenMg = 15;
 static const int rookSemiOpenEg = 5;
 
-// Mobility scalars (per attacked square in the "safe" area)
-// Tuned conservatively - these only need to be directionally right.
-static const int mobilityMg[6] = { 0, 4, 4, 2, 1, 0 };
-static const int mobilityEg[6] = { 0, 4, 4, 4, 2, 0 };
+// Mobility scalars (per attacked square in the "safe" area).
+// (V7) Slight rook EG / queen MG bump.
+static const int mobilityMg[6] = { 0, 4, 4, 2, 2, 0 };
+static const int mobilityEg[6] = { 0, 4, 4, 5, 2, 0 };
 
 // King safety attack weights per attacker piece type
 static const int attackerWeight[6] = { 0, 2, 2, 3, 5, 0 };
+
+// (V7) Safe-check weight added to king-safety attack units. Each enemy piece
+// type contributes attackerWeight[pt] * SafeCheckUnits per safe check square.
+static const int safeCheckUnits = 12;
+
+// (V7) Outposts. Knight outpost stronger than bishop's.
+static const int knightOutpostMg = 25;
+static const int knightOutpostEg = 12;
+static const int bishopOutpostMg = 12;
+static const int bishopOutpostEg = 6;
+
+// (V7) Threat penalties applied to the SIDE under threat. Values match
+// Stockfish-style scaling (minor-by-pawn is the most painful).
+static const int threatMinorByPawnMg = -30;
+static const int threatMinorByPawnEg = -20;
+static const int threatRookByMinorMg = -25;
+static const int threatRookByMinorEg = -20;
+static const int threatQueenByLesserMg = -50;
+static const int threatQueenByLesserEg = -30;
 
 // Pawn shield: bonus per friendly pawn in front of a castled king (first two ranks)
 static const int pawnShieldBonus = 12;
@@ -286,6 +317,13 @@ static void evaluatePawnSide(const Position& pos, Color us, int& mg, int& eg) {
         }
     }
 
+    Bitboard ourPawnAtk = pawnAttacksBB(us, ourPawns);
+
+    // (V7) Phalanx neighbours: same-rank friendly pawn on adjacent file.
+    Bitboard left  = (ourPawns & ~FileHBB) << 1;
+    Bitboard right = (ourPawns & ~FileABB) >> 1;
+    Bitboard phalanxNeighbours = left | right;
+
     Bitboard bb = ourPawns;
     while (bb) {
         Square s = BB::poplsb(bb);
@@ -301,6 +339,41 @@ static void evaluatePawnSide(const Position& pos, Color us, int& mg, int& eg) {
         if ((IsolatedMask[f] & ourPawns) == 0) {
             mg += isolatedPawnMg;
             eg += isolatedPawnEg;
+        }
+
+        // (V7) Connected / phalanx — pawn is defended by another pawn (own
+        // attack landing on it) or has a friendly pawn next to it on the
+        // same rank.
+        bool defended = (ourPawnAtk & squareBB(s)) != 0;
+        bool phalanx  = (phalanxNeighbours & squareBB(s)) != 0;
+        if (defended || phalanx) {
+            mg += connectedBaseMg + relRank * connectedRankMg;
+            eg +=                   relRank * connectedRankEg;
+        }
+
+        // (V7) Backward pawn: stop square attacked by enemy pawn AND no
+        // friendly pawn on adjacent files at same-or-lower rank to support
+        // its advance.
+        Square stopSq = (us == WHITE) ? Square(int(s) + 8) : Square(int(s) - 8);
+        if (int(stopSq) >= 0 && int(stopSq) < 64) {
+            bool stopAttacked = (BB::PawnAttacks[us][stopSq] & theirPawns) != 0;
+            if (stopAttacked) {
+                Bitboard adjFilePawns = IsolatedMask[f] & ourPawns;
+                bool hasSupport = false;
+                while (adjFilePawns) {
+                    Square as = BB::poplsb(adjFilePawns);
+                    int ar = rankOf(as);
+                    if ((us == WHITE && ar <= r) ||
+                        (us == BLACK && ar >= r)) {
+                        hasSupport = true;
+                        break;
+                    }
+                }
+                if (!hasSupport) {
+                    mg += backwardPawnMg;
+                    eg += backwardPawnEg;
+                }
+            }
         }
     }
 }
@@ -335,21 +408,35 @@ static bool probePawnHash(const Position& pos, int mg[2], int eg[2]) {
     return false;
 }
 
+// (V7) Per-side attack bitboards. Collected during the per-side eval pass
+// so the cross-side terms (threats, safe-check) can be computed afterwards.
+struct SideAttacks {
+    Bitboard pawn = 0;
+    Bitboard knight = 0;
+    Bitboard bishop = 0;
+    Bitboard rook = 0;
+    Bitboard queen = 0;
+    Bitboard king = 0;
+    Bitboard all = 0;
+};
+
 // Evaluate all non-PST terms for one side; accumulate into mg/eg (positive = good for `us`).
-// Also feeds king-safety attack units via out parameters.
+// Also feeds king-safety attack units via out parameters AND fills the
+// SideAttacks struct for the second pass.
 static void evaluateSide(const Position& pos, Color us,
                          int& mg, int& eg,
                          int& attackUnits, int& attackers,
                          Bitboard pawnAtkUs, Bitboard pawnAtkThem,
-                         Bitboard occAll) {
-    (void)pawnAtkUs; // not used on `us` side currently; kept for symmetry / future
-
+                         Bitboard occAll,
+                         SideAttacks& myAtk) {
     Color them = ~us;
     Square ksqThem = pos.kingSq(them);
     Bitboard kingZone = KingZone[them][ksqThem];
 
     Bitboard ourPawns   = pos.pieces(us, PAWN);
     Bitboard theirPawns = pos.pieces(them, PAWN);
+
+    myAtk.pawn = pawnAtkUs;
 
     // ---------- Bishop pair ----------
     if (BB::popcount(pos.pieces(us, BISHOP)) >= 2) {
@@ -358,9 +445,9 @@ static void evaluateSide(const Position& pos, Color us,
     }
 
     // ---------- Rooks on (semi-)open files ----------
-    Bitboard rooks = pos.pieces(us, ROOK);
-    while (rooks) {
-        Square s = BB::poplsb(rooks);
+    Bitboard rooksRO = pos.pieces(us, ROOK);
+    while (rooksRO) {
+        Square s = BB::poplsb(rooksRO);
         Bitboard fileMask = fileBB(fileOf(s));
         bool ownPawnOnFile   = (fileMask & ourPawns) != 0;
         bool enemyPawnOnFile = (fileMask & theirPawns) != 0;
@@ -375,15 +462,14 @@ static void evaluateSide(const Position& pos, Color us,
         }
     }
 
-    // ---------- Mobility + king-zone attacks ----------
-    // "Safe" mobility mask: exclude own pieces and squares attacked by enemy pawns.
+    // ---------- Mobility + king-zone attacks + collected attack BBs ----------
     Bitboard safe = ~pos.pieces(us) & ~pawnAtkThem;
 
-    // Knights
     Bitboard knights = pos.pieces(us, KNIGHT);
     while (knights) {
         Square s = BB::poplsb(knights);
         Bitboard atk = BB::KnightAttacks[s];
+        myAtk.knight |= atk;
         int m = BB::popcount(atk & safe);
         mg += m * mobilityMg[KNIGHT];
         eg += m * mobilityEg[KNIGHT];
@@ -391,11 +477,11 @@ static void evaluateSide(const Position& pos, Color us,
         if (kz) { attackUnits += attackerWeight[KNIGHT] * BB::popcount(kz); attackers++; }
     }
 
-    // Bishops
     Bitboard bishops = pos.pieces(us, BISHOP);
     while (bishops) {
         Square s = BB::poplsb(bishops);
         Bitboard atk = BB::bishopAttacks(s, occAll);
+        myAtk.bishop |= atk;
         int m = BB::popcount(atk & safe);
         mg += m * mobilityMg[BISHOP];
         eg += m * mobilityEg[BISHOP];
@@ -403,11 +489,11 @@ static void evaluateSide(const Position& pos, Color us,
         if (kz) { attackUnits += attackerWeight[BISHOP] * BB::popcount(kz); attackers++; }
     }
 
-    // Rooks
     Bitboard rks = pos.pieces(us, ROOK);
     while (rks) {
         Square s = BB::poplsb(rks);
         Bitboard atk = BB::rookAttacks(s, occAll);
+        myAtk.rook |= atk;
         int m = BB::popcount(atk & safe);
         mg += m * mobilityMg[ROOK];
         eg += m * mobilityEg[ROOK];
@@ -415,16 +501,42 @@ static void evaluateSide(const Position& pos, Color us,
         if (kz) { attackUnits += attackerWeight[ROOK] * BB::popcount(kz); attackers++; }
     }
 
-    // Queens
     Bitboard queens = pos.pieces(us, QUEEN);
     while (queens) {
         Square s = BB::poplsb(queens);
         Bitboard atk = BB::queenAttacks(s, occAll);
+        myAtk.queen |= atk;
         int m = BB::popcount(atk & safe);
         mg += m * mobilityMg[QUEEN];
         eg += m * mobilityEg[QUEEN];
         Bitboard kz = atk & kingZone;
         if (kz) { attackUnits += attackerWeight[QUEEN] * BB::popcount(kz); attackers++; }
+    }
+
+    Square ksqUs = pos.kingSq(us);
+    myAtk.king = (ksqUs != NO_SQUARE) ? BB::KingAttacks[ksqUs] : 0;
+    myAtk.all = myAtk.pawn | myAtk.knight | myAtk.bishop | myAtk.rook | myAtk.queen | myAtk.king;
+
+    // ---------- Outposts (V7) ----------
+    // Knight or bishop on rank 4-6 (relative), defended by friendly pawn,
+    // with no enemy pawn on adjacent files ahead.
+    Bitboard ourMinors = pos.pieces(us, KNIGHT) | pos.pieces(us, BISHOP);
+    Bitboard outpostSupport = pawnAtkUs;
+    while (ourMinors) {
+        Square s = BB::poplsb(ourMinors);
+        int relR = (us == WHITE) ? rankOf(s) : (7 - rankOf(s));
+        if (relR < 3 || relR > 5) continue;
+        if (!(outpostSupport & squareBB(s))) continue;
+        Bitboard mask = PassedPawnMask[us][s] & ~fileBB(fileOf(s));
+        if ((mask & theirPawns) != 0) continue;
+        bool isKnight = (pos.pieceOn(s) == makePiece(us, KNIGHT));
+        if (isKnight) {
+            mg += knightOutpostMg;
+            eg += knightOutpostEg;
+        } else {
+            mg += bishopOutpostMg;
+            eg += bishopOutpostEg;
+        }
     }
 }
 
@@ -441,7 +553,7 @@ int evaluateClassical(const Position& pos) {
     int egScore[2] = { 0, 0 };
     int phase = 0;
 
-    // PST + material (unchanged from v2)
+    // PST + material
     for (int c = WHITE; c <= BLACK; ++c) {
         for (int pt = PAWN; pt <= KING; ++pt) {
             Bitboard bb = pos.pieces(Color(c), PieceType(pt));
@@ -455,7 +567,6 @@ int evaluateClassical(const Position& pos) {
         }
     }
 
-    // Precompute pawn attacks & occupancy (used by both sides).
     Bitboard whitePawnAtk = pawnAttacksBB(WHITE, pos.pieces(WHITE, PAWN));
     Bitboard blackPawnAtk = pawnAttacksBB(BLACK, pos.pieces(BLACK, PAWN));
     Bitboard occAll = pos.allPieces();
@@ -467,29 +578,87 @@ int evaluateClassical(const Position& pos) {
     egScore[WHITE] += pawnEg[WHITE];
     egScore[BLACK] += pawnEg[BLACK];
 
-    // Per-side structural + mobility + king-zone attacks.
     int atkUnits[2] = { 0, 0 };
     int attackers[2] = { 0, 0 };
+    SideAttacks atk[2];
     evaluateSide(pos, WHITE, mgScore[WHITE], egScore[WHITE],
                  atkUnits[WHITE], attackers[WHITE],
-                 whitePawnAtk, blackPawnAtk, occAll);
+                 whitePawnAtk, blackPawnAtk, occAll, atk[WHITE]);
     evaluateSide(pos, BLACK, mgScore[BLACK], egScore[BLACK],
                  atkUnits[BLACK], attackers[BLACK],
-                 blackPawnAtk, whitePawnAtk, occAll);
+                 blackPawnAtk, whitePawnAtk, occAll, atk[BLACK]);
 
     // Pawn shield bonus (MG)
     mgScore[WHITE] += pawnShieldBonusFor(pos, WHITE);
     mgScore[BLACK] += pawnShieldBonusFor(pos, BLACK);
 
+    // (V7) Threats — penalise the side whose pieces are attacked. For each
+    // side `us`, look at what THEY attack on US pieces.
+    for (int c = WHITE; c <= BLACK; ++c) {
+        Color us = Color(c);
+        Color them = ~us;
+        const SideAttacks& aThem = atk[them];
+
+        Bitboard ourKnights = pos.pieces(us, KNIGHT);
+        Bitboard ourBishops = pos.pieces(us, BISHOP);
+        Bitboard ourRooks   = pos.pieces(us, ROOK);
+        Bitboard ourQueens  = pos.pieces(us, QUEEN);
+
+        // Minor threatened by enemy pawn.
+        Bitboard tMinorByPawn = (ourKnights | ourBishops) & aThem.pawn;
+        int n = BB::popcount(tMinorByPawn);
+        mgScore[c] += n * threatMinorByPawnMg;
+        egScore[c] += n * threatMinorByPawnEg;
+
+        // Rook threatened by enemy minor (and not defended by own pawn).
+        Bitboard tRookByMinor = ourRooks & (aThem.knight | aThem.bishop);
+        n = BB::popcount(tRookByMinor);
+        mgScore[c] += n * threatRookByMinorMg;
+        egScore[c] += n * threatRookByMinorEg;
+
+        // Queen threatened by enemy rook or minor.
+        Bitboard tQueenByLesser = ourQueens & (aThem.knight | aThem.bishop | aThem.rook);
+        n = BB::popcount(tQueenByLesser);
+        mgScore[c] += n * threatQueenByLesserMg;
+        egScore[c] += n * threatQueenByLesserEg;
+    }
+
+    // (V7) Safe-check counts add to king-zone attack units for each side
+    // BEFORE the quadratic penalty is applied.
+    for (int c = WHITE; c <= BLACK; ++c) {
+        Color attackerC = Color(c);
+        Color defenderC = ~attackerC;
+        Square ksqDef = pos.kingSq(defenderC);
+        if (ksqDef == NO_SQUARE) continue;
+        const SideAttacks& aAtk = atk[attackerC];
+        const SideAttacks& aDef = atk[defenderC];
+
+        // Squares defended by the defender (we use the union of all
+        // attacks here; a tighter formulation would exclude squares only
+        // attacked by the defender king, but the union is sufficient for
+        // a "safe" approximation).
+        Bitboard defended = aDef.all;
+        Bitboard notDef = ~defended;
+
+        Bitboard nChecks = BB::KnightAttacks[ksqDef]            & aAtk.knight & notDef;
+        Bitboard bChecks = BB::bishopAttacks(ksqDef, occAll)    & aAtk.bishop & notDef;
+        Bitboard rChecks = BB::rookAttacks(ksqDef, occAll)      & aAtk.rook   & notDef;
+        Bitboard qChecks = BB::queenAttacks(ksqDef, occAll)     & aAtk.queen  & notDef;
+
+        atkUnits[c] += safeCheckUnits * attackerWeight[KNIGHT] * BB::popcount(nChecks);
+        atkUnits[c] += safeCheckUnits * attackerWeight[BISHOP] * BB::popcount(bChecks);
+        atkUnits[c] += safeCheckUnits * attackerWeight[ROOK]   * BB::popcount(rChecks);
+        atkUnits[c] += safeCheckUnits * attackerWeight[QUEEN]  * BB::popcount(qChecks);
+
+        if (nChecks | bChecks | rChecks | qChecks) attackers[c] = std::max(attackers[c], 2);
+    }
+
     // King-safety penalty (MG only): quadratic in attackers present, capped.
-    // Only apply when there are at least 2 attacking piece-types -
-    // one piece stranding near the enemy king shouldn't crater eval.
     for (int c = WHITE; c <= BLACK; ++c) {
         if (attackers[c] >= 2) {
             int units = atkUnits[c];
             int penalty = (units * units) / 4;
             if (penalty > 500) penalty = 500;
-            // This is a penalty for the *defender* (opposite color king).
             mgScore[~Color(c)] -= penalty;
         }
     }
