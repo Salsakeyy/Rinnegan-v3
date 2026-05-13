@@ -1,0 +1,9 @@
+# Tactical/rules regression seeds for non-NNUE baseline testing.
+# Format: FEN ; id "name"; note "expected behavior"
+
+7k/6Q1/6K1/8/8/8/8/8 b - - 0 1; id "mate_no_moves"; note "black is checkmated";
+7k/5Q2/6K1/8/8/8/8/8 b - - 0 1; id "stalemate_no_moves"; note "black is stalemated";
+8/8/8/3pP3/8/8/8/4K2k w - d6 0 1; id "en_passant_available"; note "white can play e5d6 en passant";
+r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1; id "castling_both_sides"; note "all castling rights legal in an empty-board rook test";
+8/P6k/8/8/8/8/6K1/8 w - - 0 1; id "promotion_quiet"; note "white has quiet promotions from a7a8";
+8/8/8/8/8/8/6k1/6K1 w - - 100 75; id "fifty_move_draw"; note "position is drawn by fifty-move rule";

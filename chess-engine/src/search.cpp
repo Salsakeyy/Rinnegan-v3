@@ -1,11 +1,13 @@
 #include "search.h"
 #include "eval.h"
 #include "movegen.h"
+#include "policy.h"
 #include "see.h"
 #include "uci.h"
 #include <algorithm>
-#include <cassert>
+#include <climits>
 #include <cmath>
+#include <cstring>
 #include <iostream>
 #include <thread>
 #include <vector>
@@ -36,7 +38,8 @@ static inline void updateHistory(int& entry, int bonus) {
 
 static int scoreMove(const Position& pos, Move move, Move ttMove,
                      const Move killers[2], Move counterMove,
-                     const int history[64][64]) {
+                     const int history[64][64], int policyBonus,
+                     bool quietResidual) {
     if (move == ttMove) return 1000000;
 
     Square to = move.to();
@@ -44,24 +47,34 @@ static int scoreMove(const Position& pos, Move move, Move ttMove,
     if (move.flag() == FLAG_ENPASSANT)
         captured = makePiece(~pos.sideToMove(), PAWN);
 
+    // In quiet_residual mode the policy bonus is suppressed for the
+    // tactical (capture / promotion) branches so that the model cannot
+    // perturb cross-bucket ordering. Killers / counters / history are
+    // quiet by definition and still receive the residual.
+    int captureBonus   = quietResidual ? 0 : policyBonus;
+    int promotionBonus = quietResidual ? 0 : policyBonus;
+
     if (captured != NO_PIECE) {
         Piece mover = pos.pieceOn(move.from());
-        return 100000 + MVV_LVA[pieceType(mover)][pieceType(captured)];
+        return 100000 + MVV_LVA[pieceType(mover)][pieceType(captured)] + captureBonus;
     }
 
-    if (move.flag() == FLAG_PROMOTION) return 90000 + move.promoPiece();
-    if (move == killers[0]) return 80000;
-    if (move == killers[1]) return 79000;
-    if (counterMove && move == counterMove) return 78000;
+    if (move.flag() == FLAG_PROMOTION) return 90000 + move.promoPiece() + promotionBonus;
+    if (move == killers[0]) return 80000 + policyBonus;
+    if (move == killers[1]) return 79000 + policyBonus;
+    if (counterMove && move == counterMove) return 78000 + policyBonus;
 
-    return history[move.from()][move.to()];
+    return history[move.from()][move.to()] + policyBonus;
 }
 
 static void sortMoves(const Position& pos, MoveList& moves, int* scores,
                       Move ttMove, const Move killers[2], Move counterMove,
-                      const int history[64][64]) {
+                      const int history[64][64], const int* policyBonuses = nullptr,
+                      bool quietResidual = false) {
     for (int i = 0; i < moves.count; ++i)
-        scores[i] = scoreMove(pos, moves[i], ttMove, killers, counterMove, history);
+        scores[i] = scoreMove(pos, moves[i], ttMove, killers, counterMove, history,
+                              policyBonuses ? policyBonuses[i] : 0,
+                              quietResidual);
 
     for (int i = 1; i < moves.count; ++i) {
         Move move = moves[i];
@@ -131,6 +144,16 @@ inline int elapsedMs(const SearchShared& shared) {
     return int(std::chrono::duration_cast<std::chrono::milliseconds>(now - shared.startTime).count());
 }
 
+inline int searchOverheadMs(int budgetMs) {
+    if (budgetMs <= 20)
+        return 1;
+    return std::clamp(budgetMs / 20, 2, 25);
+}
+
+inline int effectiveMoveOverheadMs(int budgetMs) {
+    return std::max(searchOverheadMs(budgetMs), std::clamp(UCI::moveOverhead, 0, 5000));
+}
+
 inline void storeMax(std::atomic<int>& target, int value) {
     int current = target.load(std::memory_order_relaxed);
     while (current < value &&
@@ -138,54 +161,26 @@ inline void storeMax(std::atomic<int>& target, int value) {
     }
 }
 
-inline const NNUE::Accumulator* currentAccumulator(const ThreadData& td) {
-    return td.useNNUE ? &td.accStack[td.accIdx] : nullptr;
+inline bool rootMoveAllowed(const SearchLimits& limits, Move move) {
+    if (limits.searchMoveCount <= 0)
+        return true;
+    for (int i = 0; i < limits.searchMoveCount; ++i) {
+        if (limits.searchMoves[i] == move)
+            return true;
+    }
+    return false;
 }
 
-inline void pushAccumulator(ThreadData& td) {
-    assert(td.accIdx + 1 < ThreadData::ACC_STACK_SIZE);
-    td.accStack[td.accIdx + 1] = td.accStack[td.accIdx];
-    ++td.accIdx;
-}
+void filterRootMoves(MoveList& moves, const SearchLimits& limits) {
+    if (limits.searchMoveCount <= 0)
+        return;
 
-inline void popAccumulator(ThreadData& td) {
-    assert(td.accIdx > 0);
-    --td.accIdx;
-}
-
-inline void applyMoveToAccumulator(NNUE::Accumulator& acc, Color us, Move move,
-                                   Piece movedPiece, Piece capturedPiece) {
-    Square from = move.from();
-    Square to = move.to();
-
-    switch (move.flag()) {
-    case FLAG_CASTLING: {
-        NNUE::movePiece(acc, us, KING, from, to);
-        if (to > from)
-            NNUE::movePiece(acc, us, ROOK, Square(from + 3), Square(from + 1));
-        else
-            NNUE::movePiece(acc, us, ROOK, Square(from - 4), Square(from - 1));
-        break;
+    int out = 0;
+    for (int i = 0; i < moves.count; ++i) {
+        if (rootMoveAllowed(limits, moves[i]))
+            moves[out++] = moves[i];
     }
-    case FLAG_ENPASSANT: {
-        NNUE::movePiece(acc, us, PAWN, from, to);
-        Square capturedSq = (us == WHITE) ? Square(to - 8) : Square(to + 8);
-        NNUE::subPiece(acc, ~us, PAWN, capturedSq);
-        break;
-    }
-    case FLAG_PROMOTION: {
-        NNUE::subPiece(acc, us, PAWN, from);
-        if (capturedPiece != NO_PIECE)
-            NNUE::subPiece(acc, ~us, pieceType(capturedPiece), to);
-        NNUE::addPiece(acc, us, move.promoPiece(), to);
-        break;
-    }
-    default:
-        NNUE::movePiece(acc, us, pieceType(movedPiece), from, to);
-        if (capturedPiece != NO_PIECE)
-            NNUE::subPiece(acc, ~us, pieceType(capturedPiece), to);
-        break;
-    }
+    moves.count = out;
 }
 
 } // namespace
@@ -214,7 +209,7 @@ bool Search::onNode(ThreadData& td, int ply) {
     if (shared.limits.nodes > 0 && global >= shared.limits.nodes)
         shared.stopped.store(true, std::memory_order_relaxed);
 
-    if (td.threadId == 0 && (global & 2047) == 0)
+    if (td.threadId == 0 && (global & 255) == 0)
         checkTime();
 
     return shared.stopped.load(std::memory_order_relaxed);
@@ -242,8 +237,11 @@ void Search::allocateTime(const SearchLimits& limits, Color side) {
     shared.hardLimit = 0;
 
     if (limits.movetime > 0) {
-        shared.softLimit = limits.movetime;
-        shared.hardLimit = limits.movetime;
+        int overhead = std::min(effectiveMoveOverheadMs(limits.movetime),
+                                std::max(0, limits.movetime - 1));
+        int budget = std::max(1, limits.movetime - overhead);
+        shared.softLimit = budget;
+        shared.hardLimit = budget;
         return;
     }
     if (limits.infinite)
@@ -255,27 +253,27 @@ void Search::allocateTime(const SearchLimits& limits, Color side) {
         return;
 
     int movesToGo = limits.movestogo > 0 ? limits.movestogo : 30;
-    int soft = timeLeft / movesToGo + inc * 3 / 4;
-    soft = std::max(10, soft);
-    soft = std::min(soft, timeLeft / 2);
+    int reserve = std::max(20, timeLeft / 50);
+    int usable = std::max(1, timeLeft - reserve);
+    int soft = usable / movesToGo + inc * 3 / 4;
+    soft = std::max(5, soft);
+    soft = std::min(soft, std::max(1, usable / 2));
 
     int hard = soft * 4;
-    int cap = std::max(10, timeLeft / 3);
+    int cap = std::max(5, usable / 3);
     hard = std::min(hard, cap);
     hard = std::max(hard, soft);
+    int overhead = std::min(effectiveMoveOverheadMs(hard), std::max(0, hard - 1));
+    hard = std::max(1, hard - overhead);
+    soft = std::min(soft, hard);
 
     shared.softLimit = soft;
     shared.hardLimit = hard;
 }
 
-void Search::initThreadData(ThreadData& td, const Position& root, bool useNNUE) {
+void Search::initThreadData(ThreadData& td, const Position& root) {
     td = ThreadData{};
     td.pos.copyFrom(root, td.rootState);
-    td.useNNUE = useNNUE;
-    td.accIdx = 0;
-
-    if (td.useNNUE)
-        NNUE::refresh(td.pos, td.accStack[0]);
 }
 
 // ---------- Quiescence ----------
@@ -286,11 +284,11 @@ int Search::quiescence(ThreadData& td, int alpha, int beta, int ply) {
     if (shared.stopped.load(std::memory_order_relaxed))
         return 0;
     if (ply >= ThreadData::STATE_STACK_SIZE - 1)
-        return Eval::evaluate(pos, currentAccumulator(td));
+        return Eval::evaluate(pos);
     if (onNode(td, ply))
         return 0;
 
-    int standPat = Eval::evaluate(pos, currentAccumulator(td));
+    int standPat = Eval::evaluate(pos);
     if (standPat >= beta) return beta;
     if (alpha < standPat) alpha = standPat;
 
@@ -305,7 +303,6 @@ int Search::quiescence(ThreadData& td, int alpha, int beta, int ply) {
 
     for (int i = 0; i < captures.count; ++i) {
         Move move = captures[i];
-        Piece movedPiece = pos.pieceOn(move.from());
         Piece capturedPiece = (move.flag() == FLAG_ENPASSANT) ? makePiece(~us, PAWN) : pos.pieceOn(move.to());
 
         // SEE pruning: when stand-pat + captured-value can't reach alpha, skip
@@ -315,24 +312,16 @@ int Search::quiescence(ThreadData& td, int alpha, int beta, int ply) {
             !SEE::seeGE(pos, move, -50))
             continue;
 
-        if (td.useNNUE) {
-            if (td.accIdx + 1 >= ThreadData::ACC_STACK_SIZE)
-                break;
-            pushAccumulator(td);
-            applyMoveToAccumulator(td.accStack[td.accIdx], us, move, movedPiece, capturedPiece);
-        }
-
         pos.makeMove(move, td.stateStack[ply]);
+        shared.tt.prefetch(pos.key());
         if (pos.isSquareAttacked(pos.kingSq(us), pos.sideToMove())) {
             pos.unmakeMove(move);
-            if (td.useNNUE) popAccumulator(td);
             continue;
         }
 
         int score = -quiescence(td, -beta, -alpha, ply + 1);
 
         pos.unmakeMove(move);
-        if (td.useNNUE) popAccumulator(td);
 
         if (shared.stopped.load(std::memory_order_relaxed))
             return 0;
@@ -353,9 +342,9 @@ int Search::negamax(ThreadData& td, int alpha, int beta, int depth, int ply, boo
     if (shared.stopped.load(std::memory_order_relaxed))
         return 0;
     if (ply >= MAX_PLY - 1)
-        return Eval::evaluate(pos, currentAccumulator(td));
+        return Eval::evaluate(pos);
     if (ply >= ThreadData::STATE_STACK_SIZE - 1)
-        return Eval::evaluate(pos, currentAccumulator(td));
+        return Eval::evaluate(pos);
 
     if (ply > 0 && pos.isDraw(ply))
         return SCORE_DRAW;
@@ -391,9 +380,10 @@ int Search::negamax(ThreadData& td, int alpha, int beta, int depth, int ply, boo
             ttStaticEval = ttEntry->staticEval;
             if (!pvNode && ttEntry->depth >= depth) {
                 int ttScore = scoreFromTT(ttEntry->score, ply);
-                if (ttEntry->flag == TT_EXACT) return ttScore;
-                if (ttEntry->flag == TT_LOWER && ttScore >= beta) return ttScore;
-                if (ttEntry->flag == TT_UPPER && ttScore <= alpha) return ttScore;
+                TTFlag ttFlagVal = ttEntry->flag();
+                if (ttFlagVal == TT_EXACT) return ttScore;
+                if (ttFlagVal == TT_LOWER && ttScore >= beta) return ttScore;
+                if (ttFlagVal == TT_UPPER && ttScore <= alpha) return ttScore;
             }
         }
     }
@@ -404,7 +394,7 @@ int Search::negamax(ThreadData& td, int alpha, int beta, int depth, int ply, boo
     } else if (ttHit && ttStaticEval != SCORE_NONE) {
         staticEval = ttStaticEval;
     } else {
-        staticEval = Eval::evaluate(pos, currentAccumulator(td));
+        staticEval = Eval::evaluate(pos);
     }
     td.staticEvalStack[ply] = staticEval;
 
@@ -440,16 +430,11 @@ int Search::negamax(ThreadData& td, int alpha, int beta, int depth, int ply, boo
             ~pos.pieces(pos.sideToMove(), KING);
         if (nonPawnMaterial) {
             int reduction = 2 + depth / 4;
-            if (td.useNNUE) {
-                if (td.accIdx + 1 >= ThreadData::ACC_STACK_SIZE)
-                    return staticEval;
-                pushAccumulator(td);
-            }
 
             pos.doNullMove(td.stateStack[ply]);
+            shared.tt.prefetch(pos.key());
             int nullScore = -negamax(td, -beta, -beta + 1, depth - reduction - 1, ply + 1, false, !cutNode);
             pos.undoNullMove();
-            if (td.useNNUE) popAccumulator(td);
 
             if (shared.stopped.load(std::memory_order_relaxed))
                 return 0;
@@ -467,6 +452,11 @@ int Search::negamax(ThreadData& td, int alpha, int beta, int depth, int ply, boo
     MoveGen::generateLegal(pos, moves);
     if (moves.count == 0)
         return inCheck ? (-SCORE_MATE + ply) : SCORE_DRAW;
+    if (ply == 0) {
+        filterRootMoves(moves, shared.limits);
+        if (moves.count == 0)
+            return SCORE_DRAW;
+    }
 
     Move prevMove = (ply > 0) ? td.prevMoveStack[ply - 1] : MOVE_NONE;
     Color us = pos.sideToMove();
@@ -475,7 +465,41 @@ int Search::negamax(ThreadData& td, int alpha, int beta, int depth, int ply, boo
         counterMove = td.counter[us][prevMove.from()][prevMove.to()];
 
     int scores[MAX_MOVES];
-    sortMoves(pos, moves, scores, ttMove, td.killers[ply], counterMove, td.history[us]);
+    int policyBonuses[MAX_MOVES] = {};
+    const int* rootPolicyBonuses = nullptr;
+    if (ply == 0 && shared.rootPolicyValid) {
+        // Move generator is deterministic for a fixed position, so the order
+        // here matches the cached order. Verify and memcpy on the fast path;
+        // fall back to per-move lookup if anything looks off.
+        bool ordered = (moves.count == shared.rootPolicyCount);
+        for (int i = 0; ordered && i < moves.count; ++i)
+            if (moves[i].data != shared.rootPolicyMoves[i].data) ordered = false;
+        if (ordered) {
+            std::memcpy(policyBonuses, shared.rootPolicyBonus,
+                        size_t(moves.count) * sizeof(int));
+        } else {
+            for (int i = 0; i < moves.count; ++i) {
+                int b = 0;
+                for (int j = 0; j < shared.rootPolicyCount; ++j) {
+                    if (shared.rootPolicyMoves[j].data == moves[i].data) {
+                        b = shared.rootPolicyBonus[j];
+                        break;
+                    }
+                }
+                policyBonuses[i] = b;
+            }
+        }
+        rootPolicyBonuses = policyBonuses;
+    }
+    // quiet_residual is selected by either the v1 or v2 mode knob, depending
+    // on which binary the user has loaded. The bonus values themselves come
+    // from `rootPolicyBonuses` (already populated upstream by Policy::scoreMoves
+    // or Policy::scoreMovesV2 — see Search::go below).
+    bool quietResidual = (ply == 0) &&
+        ((UCI::usePolicyV2 && UCI::policyV2Mode == 2) ||
+         (!UCI::usePolicyV2 && UCI::policyMode == 2));
+    sortMoves(pos, moves, scores, ttMove, td.killers[ply], counterMove,
+              td.history[us], rootPolicyBonuses, quietResidual);
 
     Move quietsTried[MAX_MOVES];
     int quietCount = 0;
@@ -485,8 +509,12 @@ int Search::negamax(ThreadData& td, int alpha, int beta, int depth, int ply, boo
     TTFlag ttFlag = TT_UPPER;
 
     for (int i = 0; i < moves.count; ++i) {
+        if (ply == 0)
+            checkTime();
+        if (shared.stopped.load(std::memory_order_relaxed))
+            return 0;
+
         Move move = moves[i];
-        Piece movedPiece = pos.pieceOn(move.from());
         Piece capturedPiece = (move.flag() == FLAG_ENPASSANT) ? makePiece(~us, PAWN) : pos.pieceOn(move.to());
         bool isCapture = capturedPiece != NO_PIECE;
         bool isPromotion = move.flag() == FLAG_PROMOTION;
@@ -512,14 +540,8 @@ int Search::negamax(ThreadData& td, int alpha, int beta, int depth, int ply, boo
             !SEE::seeGE(pos, move, -30 * depth))
             continue;
 
-        if (td.useNNUE) {
-            if (td.accIdx + 1 >= ThreadData::ACC_STACK_SIZE)
-                break;
-            pushAccumulator(td);
-            applyMoveToAccumulator(td.accStack[td.accIdx], us, move, movedPiece, capturedPiece);
-        }
-
         pos.makeMove(move, td.stateStack[ply]);
+        shared.tt.prefetch(pos.key());
         bool givesCheck = pos.inCheck();
         td.prevMoveStack[ply] = move;
 
@@ -560,7 +582,6 @@ int Search::negamax(ThreadData& td, int alpha, int beta, int depth, int ply, boo
         }
 
         pos.unmakeMove(move);
-        if (td.useNNUE) popAccumulator(td);
 
         if (shared.stopped.load(std::memory_order_relaxed))
             return 0;
@@ -606,7 +627,8 @@ int Search::negamax(ThreadData& td, int alpha, int beta, int depth, int ply, boo
         td.bestScore = bestScore;
     }
 
-    shared.tt.store(pos.key(), scoreToTT(bestScore, ply), ttFlag, depth, bestMove, staticEval);
+    if (!(ply == 0 && shared.limits.searchMoveCount > 0))
+        shared.tt.store(pos.key(), scoreToTT(bestScore, ply), ttFlag, depth, bestMove, staticEval);
     return bestScore;
 }
 
@@ -691,6 +713,17 @@ void Search::workerLoop(ThreadData& td) {
             int scaledSoft = shared.softLimit;
             if (td.stableIters >= 3)
                 scaledSoft = (scaledSoft * 80) / 100;
+            // Confidence-driven shave: if the root policy assigns a clearly
+            // peaked distribution to one move, the position is "easy" and we
+            // can spend less time on it. margin_norm in [0, 1000];
+            // factor = 1 - (boost/100) * (margin_norm/1000).
+            if (UCI::policyTimeMod && shared.rootPolicyValid &&
+                shared.policyConfidence > 0 && UCI::policyTimeBoost > 0) {
+                int margin = std::min(shared.policyConfidence, UCI::policyTimeMargin);
+                int marginNorm = (margin * 1000) / UCI::policyTimeMargin;  // [0, 1000]
+                int shavePerMille = (UCI::policyTimeBoost * marginNorm) / 100;  // [0, 800]
+                scaledSoft = (scaledSoft * (1000 - shavePerMille)) / 1000;
+            }
             if (elapsedMs(shared) >= scaledSoft)
                 break;
         }
@@ -705,20 +738,74 @@ void Search::workerLoop(ThreadData& td) {
 void Search::go(Position& pos, const SearchLimits& limits, bool printOutput) {
     printOutput_ = printOutput;
     lastNodes_ = 0;
+    lastBestMove_ = MOVE_NONE;
 
     shared.stopped.store(false, std::memory_order_relaxed);
     shared.globalNodes.store(0, std::memory_order_relaxed);
     shared.completedDepth.store(0, std::memory_order_relaxed);
     shared.limits = limits;
     shared.startTime = std::chrono::steady_clock::now();
+    shared.tt.newSearch();
     allocateTime(limits, pos.sideToMove());
 
     int threadCount = std::clamp(UCI::threads, 1, 256);
-    bool useNNUE = UCI::useNNUE && NNUE::isLoaded();
+
+    if (limits.searchMoveCount > 0) {
+        MoveList legalRootMoves;
+        MoveGen::generateLegal(pos, legalRootMoves);
+        filterRootMoves(legalRootMoves, limits);
+        if (legalRootMoves.count == 0) {
+            lastNodes_ = 0;
+            lastBestMove_ = MOVE_NONE;
+            if (printOutput_)
+                std::cout << "bestmove 0000" << std::endl;
+            return;
+        }
+    }
+
+    // Populate the root policy cache once. Reused across all ID iterations
+    // and aspiration re-searches by every worker thread.
+    shared.rootPolicyCount = 0;
+    shared.rootPolicyValid = false;
+    shared.policyConfidence = 0;
+    bool wantV1 = UCI::usePolicy   && UCI::policyMode   != 0 && Policy::isLoaded()   && UCI::policyScale != 0;
+    bool wantV2 = UCI::usePolicyV2 && UCI::policyV2Mode != 0 && Policy::isV2Loaded();
+    if (wantV1 || wantV2) {
+        MoveList rootMoves;
+        MoveGen::generateLegal(pos, rootMoves);
+        filterRootMoves(rootMoves, limits);
+        if (wantV2) {
+            Policy::scoreMovesV2(pos, rootMoves.moves, rootMoves.count,
+                                 UCI::policyV2Scale, UCI::policyV2QuietScale,
+                                 UCI::policyV2EndgameScale,
+                                 UCI::policyV2BonusClamp,
+                                 shared.rootPolicyBonus);
+        } else {
+            Policy::scoreMoves(pos, rootMoves.moves, rootMoves.count,
+                               UCI::policyScale, shared.rootPolicyBonus);
+        }
+        for (int i = 0; i < rootMoves.count; ++i)
+            shared.rootPolicyMoves[i] = rootMoves[i];
+        shared.rootPolicyCount = rootMoves.count;
+        shared.rootPolicyValid = true;
+
+        // top1 - top2 margin over the cached bonuses. Used by the time
+        // manager when PolicyTimeMod is on.
+        if (rootMoves.count >= 2) {
+            int top1 = INT_MIN;
+            int top2 = INT_MIN;
+            for (int i = 0; i < rootMoves.count; ++i) {
+                int b = shared.rootPolicyBonus[i];
+                if (b > top1) { top2 = top1; top1 = b; }
+                else if (b > top2) { top2 = b; }
+            }
+            shared.policyConfidence = top1 - top2;
+        }
+    }
 
     std::vector<ThreadData> threadData(threadCount);
     for (int i = 0; i < threadCount; ++i) {
-        initThreadData(threadData[i], pos, useNNUE);
+        initThreadData(threadData[i], pos);
         threadData[i].threadId = i;
     }
 
@@ -742,6 +829,7 @@ void Search::go(Position& pos, const SearchLimits& limits, bool printOutput) {
         if (moves.count > 0)
             bestMove = moves[0];
     }
+    lastBestMove_ = bestMove;
 
     if (printOutput_) {
         if (bestMove)

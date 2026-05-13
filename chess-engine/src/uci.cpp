@@ -1,5 +1,6 @@
 #include "uci.h"
-#include "nnue.h"
+#include "eval.h"
+#include "policy.h"
 #include "movegen.h"
 #include "perft.h"
 #include "position.h"
@@ -7,7 +8,6 @@
 #include "tt.h"
 #include <algorithm>
 #include <chrono>
-#include <filesystem>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -16,15 +16,31 @@
 
 namespace UCI {
 
-bool useNNUE = true;
+bool usePolicy = false;
+bool policyTimeMod = false;
 int threads = 1;
-std::string evalFile = "rinnegan-v4.net";
+int policyScale = 160;
+int policyTimeMargin = 150;
+int policyTimeBoost = 20;
+int moveOverhead = 25;
+std::string policyFile = "data/policy/stockfish-200k/train/smoke-policy.bin";
+
+// Policy v2 state. PolicyMode controls how the (v1 or v2) bonus is fused
+// into the root move ordering. 0=off, 1=root_bonus, 2=quiet_residual.
+int policyMode = 1;
+bool usePolicyV2 = false;
+std::string policyV2File = "data/policy/v2/policy.bin";
+int policyV2Mode = 2;
+int policyV2Scale = 160;
+int policyV2QuietScale = 160;
+int policyV2EndgameScale = 100;
+int policyV2BonusClamp = 20000;
 
 namespace {
 
 // Golden bench node count at kBenchDepth. Re-pin after any patch that
 // changes node visit order. CI greps `BENCH_SIGNATURE` to verify.
-constexpr int64_t BENCH_SIGNATURE = 2080726;
+constexpr int64_t BENCH_SIGNATURE = 3136877;
 
 constexpr const char* StartPosFen =
     "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
@@ -98,25 +114,26 @@ void parseSetOption(const std::string& line, std::string& name, std::string& val
     value = trimLeft(value);
 }
 
-void reportNnueLoad(const std::string& path, bool loaded) {
-    if (loaded) {
-        std::cout << "info string NNUE loaded from " << path << std::endl;
-        return;
-    }
-
-    std::error_code ec;
-    if (std::filesystem::exists(path, ec) &&
-        std::filesystem::is_regular_file(path, ec) &&
-        std::filesystem::file_size(path, ec) != NNUE::expectedFileSize() &&
-        std::filesystem::file_size(path, ec) != NNUE::expectedPaddedFileSize()) {
-        std::cout << "info string NNUE: wrong net size, falling back to PeSTO" << std::endl;
-    } else {
-        std::cout << "info string NNUE load failed, using PeSTO" << std::endl;
-    }
+bool isGoKeyword(const std::string& token) {
+    return token == "searchmoves" ||
+           token == "ponder" ||
+           token == "wtime" ||
+           token == "btime" ||
+           token == "winc" ||
+           token == "binc" ||
+           token == "movestogo" ||
+           token == "depth" ||
+           token == "nodes" ||
+           token == "mate" ||
+           token == "movetime" ||
+           token == "infinite";
 }
 
-void tryLoadDefaultNet() {
-    NNUE::load(evalFile);
+void reportPolicyLoad(const std::string& path, bool loaded) {
+    if (loaded)
+        std::cout << "info string policy loaded from " << path << std::endl;
+    else
+        std::cout << "info string policy load failed" << std::endl;
 }
 
 void runBench() {
@@ -162,9 +179,12 @@ void runBench() {
         benchSearcher.go(pos, limits, false);
         int64_t posNodes = benchSearcher.lastNodes();
         totalNodes += posNodes;
+        Move bestMove = benchSearcher.lastBestMove();
 
         std::cout << "info string bench position " << ++posIdx
-                  << " nodes=" << posNodes << std::endl;
+                  << " nodes=" << posNodes
+                  << " bestmove=" << (bestMove ? bestMove.toUCI() : "0000")
+                  << std::endl;
     }
 
     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -180,9 +200,9 @@ void runBench() {
 }
 
 // PGO training workload. Wider position set + deeper search than bench so the
-// compiler sees branch counts on the recursive negamax / qsearch / NNUE inner
-// loops, not just the UCI/setup paths. Not user-facing; called only by the
-// build script during the profile-generation pass.
+// compiler sees branch counts on recursive negamax and qsearch, not just the
+// UCI/setup paths. Not user-facing; called only by the build script during the
+// profile-generation pass.
 void runPgoTrain() {
     static const char* kPgoFens[] = {
         // 16 existing bench positions (proven-valid, varied phases)
@@ -203,7 +223,7 @@ void runPgoTrain() {
         "r1bqk2r/ppp2ppp/2np1n2/4p3/2BPP3/2N2N2/PPP2PPP/R1BQ1RK1 w kq - 0 1",
         "4rrk1/1pp2ppp/p1np1n2/4p3/2BPP3/2N2N2/PPP2PPP/2KR3R w - - 0 1",
 
-        // Openings (varied 1.e4 / 1.d4 / 1.c4 lines; exercises movegen + NNUE refresh)
+        // Openings (varied 1.e4 / 1.d4 / 1.c4 lines)
         "rnbqkbnr/pp1ppppp/8/2p5/4P3/5N2/PPPP1PPP/RNBQKBNR b KQkq - 1 2",
         "r1bqkbnr/pp1ppppp/2n5/2p5/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 2 3",
         "rnbqkb1r/pp3ppp/2p1pn2/3p4/2PP4/5N2/PP2PPPP/RNBQKB1R w KQkq - 0 5",
@@ -224,7 +244,7 @@ void runPgoTrain() {
         "r1bq1rk1/2p1bppp/p1np1n2/1p2p3/4P3/PBNP1N1P/1PP2PP1/R1BQR1K1 b - - 0 1",
         "r1b2rk1/pp2bppp/2nq1n2/2pp4/3P4/2PBPN2/PP3PPP/RNBQR1K1 w - - 0 1",
 
-        // Endgames (basic + instructive; exercises classical eval + NNUE on sparse boards)
+        // Endgames (basic + instructive; exercises classical eval on sparse boards)
         "4k3/8/8/8/8/8/4P3/4K3 w - - 0 1",
         "4k3/8/8/2pP4/2P5/8/8/4K3 w - - 0 1",
         "1R6/4kp2/4p3/4Pp1p/3P3P/3P4/r7/5K2 b - - 0 1",
@@ -290,7 +310,6 @@ void loop() {
     Position pos;
     pos.setFromFen(StartPosFen);
 
-    tryLoadDefaultNet();
     searcher = new Search(tt);
 
     static StateInfo stateStack[1024];
@@ -303,14 +322,26 @@ void loop() {
         ss >> cmd;
 
         if (cmd == "uci") {
-            std::cout << "id name Rinnegan v4" << std::endl;
+            std::cout << "id name Rinnegan v5.3" << std::endl;
             std::cout << "id author Lorenzo" << std::endl;
             std::cout << "option name Hash type spin default 16 min 1 max 65536" << std::endl;
+            std::cout << "option name Clear Hash type button" << std::endl;
             std::cout << "option name Threads type spin default 1 min 1 max 256" << std::endl;
-            std::cout << "option name EvalFile type string default rinnegan-v4.net" << std::endl;
-            std::cout << "option name UseNNUE type check default true" << std::endl;
-            if (NNUE::isLoaded())
-                std::cout << "info string NNUE loaded from " << NNUE::loadedPath() << std::endl;
+            std::cout << "option name MoveOverhead type spin default 25 min 0 max 5000" << std::endl;
+            std::cout << "option name PolicyFile type string default data/policy/stockfish-200k/train/smoke-policy.bin" << std::endl;
+            std::cout << "option name UsePolicy type check default false" << std::endl;
+            std::cout << "option name PolicyScale type spin default 160 min -10000 max 10000" << std::endl;
+            std::cout << "option name PolicyTimeMod type check default false" << std::endl;
+            std::cout << "option name PolicyTimeMargin type spin default 150 min 1 max 5000" << std::endl;
+            std::cout << "option name PolicyTimeBoost type spin default 20 min 0 max 80" << std::endl;
+            std::cout << "option name PolicyMode type spin default 1 min 0 max 2" << std::endl;
+            std::cout << "option name UsePolicyV2 type check default false" << std::endl;
+            std::cout << "option name PolicyV2File type string default data/policy/v2/policy.bin" << std::endl;
+            std::cout << "option name PolicyV2Mode type spin default 2 min 0 max 2" << std::endl;
+            std::cout << "option name PolicyV2Scale type spin default 160 min -10000 max 10000" << std::endl;
+            std::cout << "option name PolicyV2QuietScale type spin default 160 min -10000 max 10000" << std::endl;
+            std::cout << "option name PolicyV2EndgameScale type spin default 100 min 0 max 100" << std::endl;
+            std::cout << "option name PolicyV2BonusClamp type spin default 20000 min 1000 max 60000" << std::endl;
             std::cout << "uciok" << std::endl;
         }
         else if (cmd == "isready") {
@@ -328,22 +359,70 @@ void loop() {
 
             if (name == "Hash" && !value.empty()) {
                 tt.resize(std::stoi(value));
+            } else if (name == "Clear Hash") {
+                tt.clear();
             } else if (name == "Threads" && !value.empty()) {
                 threads = std::clamp(std::stoi(value), 1, 256);
-            } else if (name == "EvalFile" && !value.empty()) {
-                evalFile = value;
-                bool loaded = NNUE::load(evalFile);
-                reportNnueLoad(evalFile, loaded);
+            } else if (name == "MoveOverhead" && !value.empty()) {
+                moveOverhead = std::clamp(std::stoi(value), 0, 5000);
+            } else if (name == "PolicyFile" && !value.empty()) {
+                policyFile = value;
+                bool loaded = Policy::load(policyFile);
+                reportPolicyLoad(policyFile, loaded);
                 tt.clear();
-            } else if (name == "UseNNUE" && !value.empty()) {
+            } else if (name == "UsePolicy" && !value.empty()) {
                 bool newValue = (value == "true" || value == "1");
-                if (newValue != useNNUE) {
-                    useNNUE = newValue;
+                if (newValue && !Policy::isLoaded())
+                    reportPolicyLoad(policyFile, Policy::load(policyFile));
+                if (newValue != usePolicy) {
+                    usePolicy = newValue;
                     tt.clear();
                 }
+            } else if (name == "PolicyScale" && !value.empty()) {
+                policyScale = std::clamp(std::stoi(value), -10000, 10000);
+                tt.clear();
+            } else if (name == "PolicyTimeMod" && !value.empty()) {
+                policyTimeMod = (value == "true" || value == "1");
+            } else if (name == "PolicyTimeMargin" && !value.empty()) {
+                policyTimeMargin = std::clamp(std::stoi(value), 1, 5000);
+            } else if (name == "PolicyTimeBoost" && !value.empty()) {
+                policyTimeBoost = std::clamp(std::stoi(value), 0, 80);
+            } else if (name == "PolicyMode" && !value.empty()) {
+                policyMode = std::clamp(std::stoi(value), 0, 2);
+                tt.clear();
+            } else if (name == "UsePolicyV2" && !value.empty()) {
+                bool newValue = (value == "true" || value == "1");
+                if (newValue && !Policy::isV2Loaded())
+                    reportPolicyLoad(policyV2File, Policy::loadV2(policyV2File));
+                if (newValue != usePolicyV2) {
+                    usePolicyV2 = newValue;
+                    tt.clear();
+                }
+            } else if (name == "PolicyV2File" && !value.empty()) {
+                policyV2File = value;
+                bool loaded = Policy::loadV2(policyV2File);
+                reportPolicyLoad(policyV2File, loaded);
+                tt.clear();
+            } else if (name == "PolicyV2Mode" && !value.empty()) {
+                policyV2Mode = std::clamp(std::stoi(value), 0, 2);
+                tt.clear();
+            } else if (name == "PolicyV2Scale" && !value.empty()) {
+                policyV2Scale = std::clamp(std::stoi(value), -10000, 10000);
+                tt.clear();
+            } else if (name == "PolicyV2QuietScale" && !value.empty()) {
+                policyV2QuietScale = std::clamp(std::stoi(value), -10000, 10000);
+                tt.clear();
+            } else if (name == "PolicyV2EndgameScale" && !value.empty()) {
+                policyV2EndgameScale = std::clamp(std::stoi(value), 0, 100);
+                tt.clear();
+            } else if (name == "PolicyV2BonusClamp" && !value.empty()) {
+                policyV2BonusClamp = std::clamp(std::stoi(value), 1000, 60000);
+                tt.clear();
             }
         }
         else if (cmd == "position") {
+            stopSearch();
+
             std::string token;
             ss >> token;
             stateIdx = 0;
@@ -378,16 +457,32 @@ void loop() {
         }
         else if (cmd == "go") {
             SearchLimits limits;
+            std::vector<std::string> tokens;
             std::string token;
-            while (ss >> token) {
-                if (token == "depth") ss >> limits.depth;
-                else if (token == "nodes") ss >> limits.nodes;
-                else if (token == "movetime") ss >> limits.movetime;
-                else if (token == "wtime") ss >> limits.wtime;
-                else if (token == "btime") ss >> limits.btime;
-                else if (token == "winc") ss >> limits.winc;
-                else if (token == "binc") ss >> limits.binc;
-                else if (token == "movestogo") ss >> limits.movestogo;
+            while (ss >> token)
+                tokens.push_back(token);
+
+            for (size_t i = 0; i < tokens.size(); ++i) {
+                token = tokens[i];
+                auto nextInt = [&]() -> int {
+                    if (i + 1 >= tokens.size()) return 0;
+                    return std::stoi(tokens[++i]);
+                };
+
+                if (token == "searchmoves") {
+                    while (i + 1 < tokens.size() && !isGoKeyword(tokens[i + 1])) {
+                        Move move = parseMove(pos, tokens[++i]);
+                        if (move && limits.searchMoveCount < MAX_MOVES)
+                            limits.searchMoves[limits.searchMoveCount++] = move;
+                    }
+                } else if (token == "depth") limits.depth = nextInt();
+                else if (token == "nodes") limits.nodes = nextInt();
+                else if (token == "movetime") limits.movetime = nextInt();
+                else if (token == "wtime") limits.wtime = nextInt();
+                else if (token == "btime") limits.btime = nextInt();
+                else if (token == "winc") limits.winc = nextInt();
+                else if (token == "binc") limits.binc = nextInt();
+                else if (token == "movestogo") limits.movestogo = nextInt();
                 else if (token == "infinite") limits.infinite = true;
             }
 
@@ -402,14 +497,40 @@ void loop() {
             stopSearch();
         }
         else if (cmd == "perft") {
+            stopSearch();
             int depth = 6;
             ss >> depth;
             Perft::divide(pos, depth);
         }
+        else if (cmd == "eval") {
+            stopSearch();
+            int classical = Eval::evaluateClassical(pos);
+            std::cout << "info string classical_eval cp " << classical << std::endl;
+        }
+        else if (cmd == "evaltrace") {
+            stopSearch();
+            std::cout << Eval::trace(pos) << std::endl;
+        }
         else if (cmd == "bench") {
+            stopSearch();
             runBench();
         }
+        else if (cmd == "policystats") {
+            // Latency telemetry. Reports total ns spent inside the policy
+            // root scoring call and the call count, then resets. Used by
+            // scripts/bench_policy_v2.sh and tools/policy/v2/bench_policy.py.
+            std::string sub;
+            ss >> sub;
+            auto p = Policy::readPerfCounters();
+            std::cout << "info string policy_calls=" << p.calls
+                      << " feature_ns=" << p.featureNanos
+                      << " forward_ns=" << p.forwardNanos
+                      << std::endl;
+            if (sub == "reset")
+                Policy::resetPerfCounters();
+        }
         else if (cmd == "pgo-train") {
+            stopSearch();
             runPgoTrain();
         }
         else if (cmd == "quit") {

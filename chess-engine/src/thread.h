@@ -1,6 +1,6 @@
 #pragma once
 
-#include "nnue.h"
+#include "movegen.h"
 #include "position.h"
 #include "tt.h"
 #include <atomic>
@@ -16,17 +16,16 @@ struct SearchLimits {
     int binc = 0;
     int movestogo = 0;
     bool infinite = false;
+    Move searchMoves[MAX_MOVES] = {};
+    int searchMoveCount = 0;
 };
 
 struct ThreadData {
     static constexpr int STATE_STACK_SIZE = MAX_PLY + 64;
-    static constexpr int ACC_STACK_SIZE = MAX_PLY + 8;
 
     Position pos;
     StateInfo rootState;
     StateInfo stateStack[STATE_STACK_SIZE] = {};
-    NNUE::Accumulator accStack[ACC_STACK_SIZE] = {};
-    int accIdx = 0;
     int staticEvalStack[MAX_PLY] = {};
     Move killers[MAX_PLY][2] = {};
     int history[2][64][64] = {};
@@ -40,7 +39,6 @@ struct ThreadData {
     int completedDepth = 0;
     int stableIters = 0;
     Move prevBest = MOVE_NONE;
-    bool useNNUE = false;
 };
 
 struct SearchShared {
@@ -54,4 +52,14 @@ struct SearchShared {
     std::chrono::time_point<std::chrono::steady_clock> startTime;
     int softLimit = 0;
     int hardLimit = 0;
+
+    // Root policy cache: computed once per `go` and reused across all
+    // iterative-deepening iterations. Order matches generateLegal() output
+    // for the root position, which is deterministic.
+    Move rootPolicyMoves[MAX_MOVES] = {};
+    int rootPolicyBonus[MAX_MOVES] = {};
+    int rootPolicyCount = 0;
+    bool rootPolicyValid = false;
+    // top1 - top2 margin over rootPolicyBonus. 0 when not valid or <2 moves.
+    int policyConfidence = 0;
 };

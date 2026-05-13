@@ -39,6 +39,7 @@ public:
     Square epSquare() const { return st->epSquare; }
     int halfmoveClock() const { return st->halfmoveClock; }
     uint64_t key() const { return st->key; }
+    uint64_t pawnKey() const { return st->pawnKey; }
 
     // For repetition detection
     bool isRepetition(int ply) const;
@@ -58,6 +59,7 @@ private:
     void removePiece(Square s);
     void movePiece(Square from, Square to);
     uint64_t computeKey() const;
+    uint64_t computePawnKey() const;
 
     Bitboard byType[7] = {};  // indexed by PieceType
     Bitboard byColor[2] = {};

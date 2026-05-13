@@ -1,8 +1,8 @@
 #include "eval.h"
 #include "bitboard.h"
-#include "nnue.h"
-#include "uci.h"
 #include <algorithm>
+#include <cstdint>
+#include <sstream>
 
 namespace Eval {
 
@@ -203,6 +203,16 @@ static Bitboard KingZone[2][64];
 // Forward file(s) used for pawn-shield detection.
 static Bitboard PawnShieldMask[2][64];
 
+struct PawnHashEntry {
+    uint64_t key = 0;
+    int mg[2] = { 0, 0 };
+    int eg[2] = { 0, 0 };
+    bool valid = false;
+};
+
+static constexpr int PawnHashSize = 4096;
+thread_local PawnHashEntry PawnHash[PawnHashSize];
+
 void init() {
     for (int sq = 0; sq < 64; ++sq) {
         int f = fileOf(Square(sq));
@@ -262,25 +272,12 @@ static inline Bitboard pawnAttacksBB(Color c, Bitboard pawns) {
     }
 }
 
-// Evaluate all non-PST terms for one side; accumulate into mg/eg (positive = good for `us`).
-// Also feeds king-safety attack units via out parameters.
-static void evaluateSide(const Position& pos, Color us,
-                         int& mg, int& eg,
-                         int& attackUnits, int& attackers,
-                         Bitboard pawnAtkUs, Bitboard pawnAtkThem,
-                         Bitboard occAll) {
-    (void)pawnAtkUs; // not used on `us` side currently; kept for symmetry / future
-
+static void evaluatePawnSide(const Position& pos, Color us, int& mg, int& eg) {
     Color them = ~us;
-    Square ksqThem = pos.kingSq(them);
-    Bitboard kingZone = KingZone[them][ksqThem];
-
-    // ---------- Pawns: passed / doubled / isolated ----------
     Bitboard ourPawns   = pos.pieces(us, PAWN);
     Bitboard theirPawns = pos.pieces(them, PAWN);
 
-    // Doubled: any pawn on a file with >= 2 friendly pawns contributes a penalty
-    // (count extras so N-stacked file costs (N-1) times).
+    // Doubled: count extras so N-stacked file costs (N-1) times.
     for (int f = 0; f < 8; ++f) {
         int cnt = BB::popcount(ourPawns & fileBB(f));
         if (cnt > 1) {
@@ -296,18 +293,63 @@ static void evaluateSide(const Position& pos, Color us,
         int r = rankOf(s);
         int relRank = (us == WHITE) ? r : (7 - r);
 
-        // Passed?
         if ((PassedPawnMask[us][s] & theirPawns) == 0) {
             mg += passedBonusMg[relRank];
             eg += passedBonusEg[relRank];
         }
 
-        // Isolated? no friendly pawn on adjacent files at all
         if ((IsolatedMask[f] & ourPawns) == 0) {
             mg += isolatedPawnMg;
             eg += isolatedPawnEg;
         }
     }
+}
+
+static bool probePawnHash(const Position& pos, int mg[2], int eg[2]) {
+    uint64_t key = pos.pawnKey();
+    PawnHashEntry& entry = PawnHash[key & (PawnHashSize - 1)];
+    if (entry.valid && entry.key == key) {
+        mg[WHITE] = entry.mg[WHITE];
+        mg[BLACK] = entry.mg[BLACK];
+        eg[WHITE] = entry.eg[WHITE];
+        eg[BLACK] = entry.eg[BLACK];
+        return true;
+    }
+
+    int computedMg[2] = { 0, 0 };
+    int computedEg[2] = { 0, 0 };
+    evaluatePawnSide(pos, WHITE, computedMg[WHITE], computedEg[WHITE]);
+    evaluatePawnSide(pos, BLACK, computedMg[BLACK], computedEg[BLACK]);
+
+    entry.key = key;
+    entry.mg[WHITE] = computedMg[WHITE];
+    entry.mg[BLACK] = computedMg[BLACK];
+    entry.eg[WHITE] = computedEg[WHITE];
+    entry.eg[BLACK] = computedEg[BLACK];
+    entry.valid = true;
+
+    mg[WHITE] = computedMg[WHITE];
+    mg[BLACK] = computedMg[BLACK];
+    eg[WHITE] = computedEg[WHITE];
+    eg[BLACK] = computedEg[BLACK];
+    return false;
+}
+
+// Evaluate all non-PST terms for one side; accumulate into mg/eg (positive = good for `us`).
+// Also feeds king-safety attack units via out parameters.
+static void evaluateSide(const Position& pos, Color us,
+                         int& mg, int& eg,
+                         int& attackUnits, int& attackers,
+                         Bitboard pawnAtkUs, Bitboard pawnAtkThem,
+                         Bitboard occAll) {
+    (void)pawnAtkUs; // not used on `us` side currently; kept for symmetry / future
+
+    Color them = ~us;
+    Square ksqThem = pos.kingSq(them);
+    Bitboard kingZone = KingZone[them][ksqThem];
+
+    Bitboard ourPawns   = pos.pieces(us, PAWN);
+    Bitboard theirPawns = pos.pieces(them, PAWN);
 
     // ---------- Bishop pair ----------
     if (BB::popcount(pos.pieces(us, BISHOP)) >= 2) {
@@ -418,6 +460,13 @@ int evaluateClassical(const Position& pos) {
     Bitboard blackPawnAtk = pawnAttacksBB(BLACK, pos.pieces(BLACK, PAWN));
     Bitboard occAll = pos.allPieces();
 
+    int pawnMg[2], pawnEg[2];
+    probePawnHash(pos, pawnMg, pawnEg);
+    mgScore[WHITE] += pawnMg[WHITE];
+    mgScore[BLACK] += pawnMg[BLACK];
+    egScore[WHITE] += pawnEg[WHITE];
+    egScore[BLACK] += pawnEg[BLACK];
+
     // Per-side structural + mobility + king-zone attacks.
     int atkUnits[2] = { 0, 0 };
     int attackers[2] = { 0, 0 };
@@ -458,14 +507,44 @@ int evaluateClassical(const Position& pos) {
     return (pos.sideToMove() == WHITE) ? score : -score;
 }
 
-int evaluate(const Position& pos) {
-    return evaluateClassical(pos);
+std::string trace(const Position& pos) {
+    int baseMg[2] = { 0, 0 };
+    int baseEg[2] = { 0, 0 };
+    int phase = 0;
+
+    for (int c = WHITE; c <= BLACK; ++c) {
+        for (int pt = PAWN; pt <= KING; ++pt) {
+            Bitboard bb = pos.pieces(Color(c), PieceType(pt));
+            while (bb) {
+                Square sq = BB::poplsb(bb);
+                int idx = (c == WHITE) ? int(sq) : int(sq ^ 56);
+                baseMg[c] += mgPieceValue[pt] + mgTables[pt][idx];
+                baseEg[c] += egPieceValue[pt] + egTables[pt][idx];
+                phase += phaseVal[pt];
+            }
+        }
+    }
+    if (phase > totalPhase) phase = totalPhase;
+
+    int pawnMg[2], pawnEg[2];
+    bool pawnHit = probePawnHash(pos, pawnMg, pawnEg);
+    int finalScore = evaluateClassical(pos);
+
+    std::ostringstream out;
+    out << "info string eval_trace"
+        << " stm=" << (pos.sideToMove() == WHITE ? "white" : "black")
+        << " final_cp=" << finalScore
+        << " phase=" << phase
+        << " base_mg=" << (baseMg[WHITE] - baseMg[BLACK])
+        << " base_eg=" << (baseEg[WHITE] - baseEg[BLACK])
+        << " pawn_mg=" << (pawnMg[WHITE] - pawnMg[BLACK])
+        << " pawn_eg=" << (pawnEg[WHITE] - pawnEg[BLACK])
+        << " pawn_hash=" << (pawnHit ? "hit" : "miss")
+        << " pawn_key=" << pos.pawnKey();
+    return out.str();
 }
 
-int evaluate(const Position& pos, const NNUE::Accumulator* acc) {
-    if (acc && NNUE::isLoaded() && UCI::useNNUE)
-        return NNUE::evaluate(*acc, pos.sideToMove());
-
+int evaluate(const Position& pos) {
     return evaluateClassical(pos);
 }
 

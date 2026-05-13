@@ -66,6 +66,16 @@ uint64_t Position::computeKey() const {
     return k;
 }
 
+uint64_t Position::computePawnKey() const {
+    uint64_t k = 0;
+    for (int sq = 0; sq < 64; ++sq) {
+        Piece p = mailbox[sq];
+        if (p != NO_PIECE && pieceType(p) == PAWN)
+            k ^= Zobrist::PieceSquare[p][sq];
+    }
+    return k;
+}
+
 void Position::setFromFen(const std::string& fen) {
     thread_local StateInfo rootState;
     setFromFen(fen, rootState);
@@ -142,6 +152,7 @@ void Position::setFromFen(const std::string& fen, StateInfo& rootState) {
     fullmoveNumber = fmc;
 
     st->key = computeKey();
+    st->pawnKey = computePawnKey();
     keyHistory.push_back(st->key);
 }
 
@@ -254,6 +265,7 @@ void Position::makeMove(Move m, StateInfo& newSt) {
 
     // Start with previous key
     uint64_t k = st->key ^ Zobrist::SideToMove;
+    uint64_t pk = st->pawnKey;
 
     // Remove castling key, will re-add after update
     k ^= Zobrist::Castling[st->castling];
@@ -284,6 +296,8 @@ void Position::makeMove(Move m, StateInfo& newSt) {
             capSq = (side == WHITE) ? Square(to - 8) : Square(to + 8);
         }
         k ^= Zobrist::PieceSquare[captured][capSq];
+        if (pieceType(captured) == PAWN)
+            pk ^= Zobrist::PieceSquare[captured][capSq];
         removePiece(capSq);
         newSt.halfmoveClock = 0;
     }
@@ -296,6 +310,7 @@ void Position::makeMove(Move m, StateInfo& newSt) {
     // Pawn-specific
     if (pieceType(pc) == PAWN) {
         newSt.halfmoveClock = 0;
+        pk ^= Zobrist::PieceSquare[pc][from];
 
         // Double pawn push: set ep square
         if (std::abs(int(to) - int(from)) == 16) {
@@ -314,6 +329,8 @@ void Position::makeMove(Move m, StateInfo& newSt) {
             k ^= Zobrist::PieceSquare[promoPc][to];     // add promoted piece
             removePiece(to);
             putPiece(promoPc, to);
+        } else {
+            pk ^= Zobrist::PieceSquare[pc][to];
         }
     }
 
@@ -323,6 +340,7 @@ void Position::makeMove(Move m, StateInfo& newSt) {
     k ^= Zobrist::Castling[newSt.castling];
 
     newSt.key = k;
+    newSt.pawnKey = pk;
     st = &newSt;
 
     // Switch side
@@ -389,6 +407,7 @@ void Position::doNullMove(StateInfo& newSt) {
     if (st->epSquare != NO_SQUARE)
         k ^= Zobrist::EnPassant[fileOf(st->epSquare)];
     newSt.key = k;
+    newSt.pawnKey = st->pawnKey;
 
     st = &newSt;
     side = ~side;

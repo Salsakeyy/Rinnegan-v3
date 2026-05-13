@@ -12,6 +12,7 @@ public:
     static void init();
 
     int64_t lastNodes() const { return lastNodes_; }
+    Move lastBestMove() const { return lastBestMove_; }
 
 private:
     int negamax(ThreadData& td, int alpha, int beta, int depth, int ply, bool doNull, bool cutNode);
@@ -20,10 +21,11 @@ private:
     void workerLoop(ThreadData& td);
     void checkTime();
     void allocateTime(const SearchLimits& limits, Color side);
-    void initThreadData(ThreadData& td, const Position& root, bool useNNUE);
+    void initThreadData(ThreadData& td, const Position& root);
     void publishDepth(int depth, int score, Move bestMove, int selDepth);
 
     SearchShared shared;
     bool printOutput_ = true;
     int64_t lastNodes_ = 0;
+    Move lastBestMove_ = MOVE_NONE;
 };

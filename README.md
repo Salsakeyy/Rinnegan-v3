@@ -4,6 +4,11 @@ A UCI chess engine written in C++20. Bitboard-based with magic bitboards for
 sliding pieces, tapered PeSTO evaluation, and a modern search stack (PVS, LMR,
 null move, TT, killers/history/counter-moves, futility/LMP/RFP/razoring).
 
+Current CCRL candidate: **Rinnegan v5.3**.
+
+Disclosure: Rinnegan is fully written by Claude and Codex as a proof of
+concept.
+
 ## Versions
 
 | Version | Approx. Elo (TC) | Notes |
@@ -11,7 +16,10 @@ null move, TT, killers/history/counter-moves, futility/LMP/RFP/razoring).
 | v1      | ~1900            | Baseline: bitboard movegen, alpha-beta, TT, qsearch |
 | v2      | ~2100 (10+0.1)   | +172 Elo vs v1 (SPRT). Added PVS + LMR, fixed FEN parsing |
 | **v3**  | **~2500+ (10+0.1)** | **+438 Elo vs v2 (SPRT, 162 games, LOS 100%, 141W / 3L / 18D)** |
-| v4      | target ~2800+    | Lazy SMP + NNUE integration, pending SPRT |
+| v4      | stronger than v3 | Lazy SMP and bench support |
+| v5.1    | development      | LTO/PGO build pipeline, OpenBench bench contract |
+| v5.2    | development      | SEE and SEE-based pruning in qsearch/main search |
+| **v5.3** | **CCRL candidate** | Improving flag, internal iterative reduction, graduated aspiration; +27.85 +/- 14.60 Elo vs v5.2 over 1000 games |
 
 v2's 2089 Elo was anchored vs Stockfish (UCI_Elo 1320–2500, 3+0.05, 150 rounds/anchor,
 combined inverse-variance-weighted estimate). v3 is +438 Elo over that baseline at
@@ -91,28 +99,18 @@ pawn-shield masks once at startup; it's wired from `main.cpp`.
 
 - Added Lazy SMP with a shared TT and per-thread `ThreadData`.
 - Each worker owns its own `Position`, `StateInfo` stack, move-ordering tables,
-  and NNUE accumulator stack.
+  and search state.
 - Thread `0` remains the main worker for UCI `info` output and wall-clock time
   checks.
 - TT replacement now prefers exact scores slightly harder under SMP races, and
   probed TT moves are guarded before use.
 
-### NNUE (`src/nnue.h`, `src/nnue.cpp`)
-
-- Added support for Bullet / Akimbo-style `(768 -> 768) x 2 -> 1` SCReLU nets.
-- Loader expects raw int16 weights on disk and falls back to PeSTO if loading
-  fails or the net size is wrong.
-- Search keeps a per-ply accumulator stack and updates it incrementally across
-  quiet moves, captures, en passant, castling, and promotions.
-
 ### Eval / UCI / tooling
 
-- `Eval::evaluate(pos, acc)` now dispatches to NNUE when a net is loaded and
-  `UseNNUE=true`, otherwise it preserves the v3 classical evaluator.
-- New UCI options: `Threads`, `EvalFile`, and `UseNNUE`.
+- `Eval::evaluate(pos)` preserves the v3 classical evaluator.
+- New UCI option: `Threads`.
 - Added `bench` to search 16 fixed positions at depth 13 and report aggregate
   nodes / NPS.
-- Added `tests/sprt_v4_vs_v3.sh` for the v4-vs-v3 SPRT gate.
 
 ---
 
@@ -136,19 +134,26 @@ src/
 ## Build & run
 
 ```
-cmake -B build
+cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ./build/engine        # UCI loop
 ./build/perft         # move-gen correctness (6 standard positions)
 ```
 
-Default NNUE path is `./rinnegan-v4.net`. If the net lives elsewhere, point the
-engine at it with `setoption name EvalFile value /path/to/net`.
+For a CCRL-style release package:
+
+```
+cd chess-engine
+bash tools/package-ccrl.sh
+```
+
+The package contains the engine binary, source snapshot, and `README_CCRL.txt`
+with the exact tester-facing settings.
 
 ## Testing
 
-- `tests/sprt_v2_vs_v1.sh`, `tests/sprt_v3_vs_v2.sh`,
-  `tests/sprt_v4_vs_v3.sh` — SPRT matches via `cutechess-cli` or `fastchess`.
+- `tests/sprt_v2_vs_v1.sh`, `tests/sprt_v3_vs_v2.sh` — SPRT matches via
+  `cutechess-cli` or `fastchess`.
 - `tests/gauntlet_elo.sh` — absolute Elo estimate by playing vs Stockfish at
   several `UCI_Elo` anchors (`anchors.conf`). Uses inverse-variance weighting
   to combine anchors. Requires `stockfish` on PATH.

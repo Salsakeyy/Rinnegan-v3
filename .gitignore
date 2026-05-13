@@ -3,6 +3,7 @@ chess-engine/build/engine_v1
 chess-engine/build/engine_v2
 
 # CMake state that varies by cmake version / platform
+chess-engine/build/
 chess-engine/build/CMakeFiles/3.*/
 chess-engine/build/CMakeFiles/4.*/
 chess-engine/build/CMakeFiles/*/compiler_depend.internal
@@ -12,15 +13,35 @@ chess-engine/config.json
 
 # Gauntlet harness per-run outputs (PGN + log per anchor)
 chess-engine/tests/gauntlet_results/
+chess-engine/tests/policy_results/
+chess-engine/tests/engines/
 
 # Out-of-tree build dirs (PGO orchestration, alternate configs)
 chess-engine/build-pgo/
 chess-engine/build-pgo-final/
 chess-engine/build-nolto/
+chess-engine/build-ccrl/
+chess-engine/release/
 
 # Standalone binaries produced by tools/openbench-build.sh
 chess-engine/rinnegan
 chess-engine/rinnegan-*
+rinnegan-code.zip
+
+# Local training data and downloaded engines
+chess-engine/data/policy/
+
+# Local run artifacts
+chess-engine/changes/
+*.log
+*.err.log
+*.pid
+*.screen-session
+*.launchd-label
+
+# Python local caches
+__pycache__/
+*.py[cod]
 
 # macOS noise
 .DS_Store

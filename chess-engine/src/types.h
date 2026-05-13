@@ -116,6 +116,7 @@ struct StateInfo {
     int halfmoveClock = 0;
     Piece captured = NO_PIECE;
     uint64_t key = 0;
+    uint64_t pawnKey = 0;
     StateInfo* previous = nullptr;
 };
 

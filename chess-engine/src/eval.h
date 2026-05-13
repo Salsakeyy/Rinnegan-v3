@@ -1,16 +1,13 @@
 #pragma once
 
 #include "position.h"
-
-namespace NNUE {
-struct Accumulator;
-}
+#include <string>
 
 namespace Eval {
 
 void init();
 int evaluateClassical(const Position& pos);
 int evaluate(const Position& pos);
-int evaluate(const Position& pos, const NNUE::Accumulator* acc);
+std::string trace(const Position& pos);
 
 } // namespace Eval

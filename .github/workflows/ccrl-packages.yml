@@ -1,0 +1,62 @@
+name: CCRL packages
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  native-package:
+    name: ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x86_64-avx2
+          - os: macos-15
+            platform: macos-arm64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build package
+        run: bash chess-engine/tools/package-ccrl.sh --platform "${{ matrix.platform }}"
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: Rinnegan-v5.3-${{ matrix.platform }}
+          path: chess-engine/release/Rinnegan-v5.3-${{ matrix.platform }}.zip
+
+  windows-cross-package:
+    name: windows-x86_64-avx2
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install MinGW
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++-mingw-w64-x86-64 zip
+
+      - name: Cross-build Windows package
+        run: |
+          cmake -S chess-engine -B chess-engine/build-ccrl \
+            -DCMAKE_SYSTEM_NAME=Windows \
+            -DCMAKE_SYSTEM_PROCESSOR=x86_64 \
+            -DCMAKE_CXX_COMPILER=x86_64-w64-mingw32-g++ \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DRINNEGAN_LTO=ON \
+            -DRINNEGAN_NATIVE=OFF
+          cmake --build chess-engine/build-ccrl --target engine perft -j"$(nproc)"
+          bash chess-engine/tools/package-ccrl.sh --no-build --platform windows-x86_64-avx2
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: Rinnegan-v5.3-windows-x86_64-avx2
+          path: chess-engine/release/Rinnegan-v5.3-windows-x86_64-avx2.zip
