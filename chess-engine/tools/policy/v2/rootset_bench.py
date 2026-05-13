@@ -59,6 +59,8 @@ CSV_FIELDS = [
     "policy_calls",
     "feature_ns",
     "forward_ns",
+    "saturated",
+    "scored_moves",
     "baseline_bestmove",
     "baseline_move_class",
     "baseline_nodes",
@@ -222,7 +224,11 @@ class UciEngine:
             if "policy_calls=" not in line:
                 continue
             out: dict[str, int] = {}
-            for key in ("policy_calls", "feature_ns", "forward_ns"):
+            # `saturated` / `scored_moves` were added in the bonus-clamp
+            # diagnostic pass. Older engines that pre-date them simply don't
+            # emit the keys and the regex falls through to 0.
+            for key in ("policy_calls", "feature_ns", "forward_ns",
+                        "saturated", "scored_moves"):
                 match = re.search(rf"{key}=(-?\d+)", line)
                 out[key] = int(match.group(1)) if match else 0
             return out
@@ -563,6 +569,8 @@ def make_row(
         "policy_calls": stats.get("policy_calls", 0),
         "feature_ns": stats.get("feature_ns", 0),
         "forward_ns": stats.get("forward_ns", 0),
+        "saturated": stats.get("saturated", 0),
+        "scored_moves": stats.get("scored_moves", 0),
         "baseline_bestmove": baseline.bestmove if baseline else result.bestmove,
         "baseline_move_class": baseline_class or move_class(board, result.bestmove),
         "baseline_nodes": baseline.nodes if baseline else result.nodes,
@@ -613,6 +621,8 @@ def aggregate_rows(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
             "off_wall_ms": off_wall,
             "feature_ns": sum(int(row["feature_ns"]) for row in cfg_rows),
             "forward_ns": sum(int(row["forward_ns"]) for row in cfg_rows),
+            "saturated": sum(int(row.get("saturated", 0)) for row in cfg_rows),
+            "scored_moves": sum(int(row.get("scored_moves", 0)) for row in cfg_rows),
         }
     return out
 
@@ -637,14 +647,17 @@ def write_summary(
     lines.append("")
     lines.append("## Config Summary")
     lines.append("")
-    lines.append("| config | clamp | positions | changes | change rate | node ratio | nps ratio | wall ratio | feature ms | forward ms |")
-    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+    lines.append("| config | clamp | positions | changes | change rate | node ratio | nps ratio | wall ratio | feature ms | forward ms | saturation |")
+    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
     for cfg in configs:
         item = agg.get(cfg.label, {})
         positions = int(item.get("positions", 0))
         changes = int(item.get("changes", 0))
+        saturated = int(item.get("saturated", 0))
+        scored = int(item.get("scored_moves", 0))
+        sat_rate = ratio(saturated, scored)
         lines.append(
-            "| {label} | {clamp} | {positions} | {changes} | {change_rate} | {node:.4f} | {nps:.4f} | {wall:.4f} | {feature:.3f} | {forward:.3f} |".format(
+            "| {label} | {clamp} | {positions} | {changes} | {change_rate} | {node:.4f} | {nps:.4f} | {wall:.4f} | {feature:.3f} | {forward:.3f} | {sat} |".format(
                 label=cfg.label,
                 clamp=cfg.bonus_clamp,
                 positions=positions,
@@ -655,6 +668,7 @@ def write_summary(
                 wall=float(item.get("wall_ratio", 0.0)),
                 feature=float(item.get("feature_ns", 0)) / 1_000_000.0,
                 forward=float(item.get("forward_ns", 0)) / 1_000_000.0,
+                sat=pct(sat_rate),
             )
         )
 

@@ -54,7 +54,29 @@ def main() -> int:
     parser.add_argument("--phase-scale", type=float, nargs="+", default=None,
                         help="Per-phase multiplicative scale (typically 3 values: opening / middlegame / endgame). "
                              "Pass empty / omit to disable phase calibration.")
+    parser.add_argument("--calibration", type=Path, default=None,
+                        help="Path to a calibration JSON produced by "
+                             "tools/policy/v2/eval_v2.py --emit-calibration. "
+                             "Fields bucket_scale / bucket_bias / phase_scale "
+                             "are loaded and override the matching CLI flags "
+                             "when those flags are not explicitly set.")
     args = parser.parse_args()
+
+    # Calibration JSON merges into the argparse view: explicit CLI flags
+    # still win, but otherwise the JSON's vectors are used. This keeps the
+    # CLI surface intact while making the bucket/phase calibration path the
+    # default deploy route.
+    if args.calibration is not None:
+        try:
+            cal = json.loads(args.calibration.read_text())
+        except Exception as exc:
+            raise SystemExit(f"failed to read calibration JSON {args.calibration}: {exc}")
+        if args.bucket_scale is None and "bucket_scale" in cal:
+            args.bucket_scale = [float(x) for x in cal["bucket_scale"]]
+        if args.bucket_bias  is None and "bucket_bias"  in cal:
+            args.bucket_bias  = [float(x) for x in cal["bucket_bias"]]
+        if not args.phase_scale and cal.get("phase_scale"):
+            args.phase_scale  = [float(x) for x in cal["phase_scale"]]
 
     ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
     config = ckpt.get("config", {})
