@@ -27,6 +27,15 @@ struct PerfCounters {
     uint64_t featureNanos = 0;
     uint64_t forwardNanos = 0;
     uint64_t calls = 0;
+    // Number of per-move bonus computations whose pre-clamp magnitude
+    // was >= the active clamp limit. High saturation means the clamp is
+    // collapsing distinguishable model outputs to a single ceiling, so
+    // within-bucket ordering falls back to history. Used by the
+    // rootset bench's clamp sweep (see docs/policy_v2_plan.md).
+    uint64_t saturatedBonuses = 0;
+    // Total per-move bonus computations attributed to the v2 path. The
+    // ratio `saturatedBonuses / scoredMoves` is the saturation rate.
+    uint64_t scoredMoves = 0;
 };
 PerfCounters readPerfCounters();
 void resetPerfCounters();

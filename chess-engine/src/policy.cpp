@@ -28,6 +28,8 @@ struct AtomicPerf {
     std::atomic<uint64_t> featureNanos{0};
     std::atomic<uint64_t> forwardNanos{0};
     std::atomic<uint64_t> calls{0};
+    std::atomic<uint64_t> saturatedBonuses{0};
+    std::atomic<uint64_t> scoredMoves{0};
 };
 AtomicPerf g_perf;
 
@@ -1116,6 +1118,7 @@ void scoreMovesV2(Position& pos, const Move* moves, int count,
 
     alignas(32) float h1[MAX_HIDDEN];
     alignas(32) float h2[MAX_HIDDEN];
+    uint64_t saturated = 0;
     for (int i = 0; i < count; ++i) {
         const float* xi = X + size_t(i) * MAX_FEATURE_DIM;
         layerForward(modelV2.w1.data(), modelV2.b1.data(), xi, F, modelV2.hidden1, h1);
@@ -1127,6 +1130,8 @@ void scoreMovesV2(Position& pos, const Move* moves, int count,
         int engineScale = isQuiet[i] ? quietScale : scale;
         float scaled = (raw + bBias) * bScale * phaseMul;
         int bonus = int(std::lround(scaled * float(engineScale)));
+        if (bonus >= clampLimit || bonus <= -clampLimit)
+            ++saturated;
         outBonuses[i] = std::clamp(bonus, -clampLimit, clampLimit);
     }
     auto t2 = std::chrono::steady_clock::now();
@@ -1138,13 +1143,17 @@ void scoreMovesV2(Position& pos, const Move* moves, int count,
         uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(t2 - t1).count()),
         std::memory_order_relaxed);
     g_perf.calls.fetch_add(1, std::memory_order_relaxed);
+    g_perf.saturatedBonuses.fetch_add(saturated, std::memory_order_relaxed);
+    g_perf.scoredMoves.fetch_add(uint64_t(count), std::memory_order_relaxed);
 }
 
 PerfCounters readPerfCounters() {
     PerfCounters out;
-    out.featureNanos = g_perf.featureNanos.load(std::memory_order_relaxed);
-    out.forwardNanos = g_perf.forwardNanos.load(std::memory_order_relaxed);
-    out.calls        = g_perf.calls.load(std::memory_order_relaxed);
+    out.featureNanos      = g_perf.featureNanos.load(std::memory_order_relaxed);
+    out.forwardNanos      = g_perf.forwardNanos.load(std::memory_order_relaxed);
+    out.calls             = g_perf.calls.load(std::memory_order_relaxed);
+    out.saturatedBonuses  = g_perf.saturatedBonuses.load(std::memory_order_relaxed);
+    out.scoredMoves       = g_perf.scoredMoves.load(std::memory_order_relaxed);
     return out;
 }
 
@@ -1152,6 +1161,8 @@ void resetPerfCounters() {
     g_perf.featureNanos.store(0, std::memory_order_relaxed);
     g_perf.forwardNanos.store(0, std::memory_order_relaxed);
     g_perf.calls.store(0, std::memory_order_relaxed);
+    g_perf.saturatedBonuses.store(0, std::memory_order_relaxed);
+    g_perf.scoredMoves.store(0, std::memory_order_relaxed);
 }
 
 } // namespace Policy

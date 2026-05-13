@@ -525,6 +525,8 @@ void loop() {
             std::cout << "info string policy_calls=" << p.calls
                       << " feature_ns=" << p.featureNanos
                       << " forward_ns=" << p.forwardNanos
+                      << " saturated=" << p.saturatedBonuses
+                      << " scored_moves=" << p.scoredMoves
                       << std::endl;
             if (sub == "reset")
                 Policy::resetPerfCounters();

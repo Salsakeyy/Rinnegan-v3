@@ -55,6 +55,64 @@ from schema import (  # noqa: E402
 )
 
 
+# Order in which the runtime reads bucket calibration vectors. Matches
+# `enum Bucket` in `src/policy.cpp` and the `BUCKET_NAMES` tuple in
+# `tools/policy/v2/schema.py`.
+BUCKET_ORDER = ("quiet", "capture", "check", "promotion")
+PHASE_ORDER  = ("opening", "middlegame", "endgame")
+
+
+def rank_gain_to_scale(g: float, thresholds: tuple[float, float, float]) -> float:
+    """Map a segment's `rank_gain_mean` to a calibration multiplier.
+
+    Defaults match the recipe in docs/policy_v2_eval_100k.md / the plan:
+    zero where the model degrades baseline ordering, partial where it
+    helps weakly, full strength where it helps strongly.
+    """
+    t_zero, t_quarter, t_three = thresholds
+    if not math.isfinite(g):
+        return 0.0
+    if g <= t_zero:    return 0.0
+    if g <  t_quarter: return 0.25
+    if g <  t_three:   return 0.75
+    return 1.0
+
+
+def build_calibration(metrics: dict,
+                      thresholds: tuple[float, float, float]) -> dict:
+    """Fit per-bucket and per-phase scale vectors from segmented metrics.
+
+    Missing segments default to scale 1.0 (no penalty); we cannot demote
+    something we never measured. Buckets/phases in the binary follow
+    the canonical `BUCKET_ORDER` / `PHASE_ORDER` so the engine loader
+    picks the right slot.
+    """
+    by_bucket = metrics.get("by_bucket", {}) or {}
+    by_phase  = metrics.get("by_phase",  {}) or {}
+
+    bucket_scale: list[float] = []
+    for name in BUCKET_ORDER:
+        seg = by_bucket.get(name)
+        g = float(seg["rank_gain_mean"]) if seg and "rank_gain_mean" in seg else float("nan")
+        bucket_scale.append(rank_gain_to_scale(g, thresholds) if math.isfinite(g) else 1.0)
+
+    phase_scale: list[float] = []
+    for name in PHASE_ORDER:
+        seg = by_phase.get(name)
+        g = float(seg["rank_gain_mean"]) if seg and "rank_gain_mean" in seg else float("nan")
+        phase_scale.append(rank_gain_to_scale(g, thresholds) if math.isfinite(g) else 1.0)
+
+    return {
+        "bucket_order": list(BUCKET_ORDER),
+        "phase_order":  list(PHASE_ORDER),
+        "bucket_scale": bucket_scale,
+        "bucket_bias":  [0.0] * len(BUCKET_ORDER),
+        "phase_scale":  phase_scale,
+        "thresholds":   list(thresholds),
+        "source_eval":  metrics,
+    }
+
+
 # ---------- Data loading ----------
 
 def load_dataset(path: Path) -> dict:
@@ -269,7 +327,24 @@ def main() -> int:
     parser.add_argument("--top-k",  type=int, default=5)
     parser.add_argument("--output", type=Path, default=None,
                         help="Optional JSON output path. If unset, prints to stdout.")
+    parser.add_argument("--emit-calibration", type=Path, default=None,
+                        help="If set, also write a calibration JSON for "
+                             "tools/policy/v2/export_v2.py --calibration. "
+                             "Derives bucket_scale/phase_scale from segmented "
+                             "rank_gain_mean values; bucket order matches the "
+                             "RINPOL2 binary layout.")
+    parser.add_argument("--calib-thresholds", type=str, default="0,1,3",
+                        help="Comma-separated rank_gain thresholds: "
+                             "g<=t0 -> 0.0, t0<g<t1 -> 0.25, t1<=g<t2 -> 0.75, g>=t2 -> 1.0. "
+                             "Defaults match docs/policy_v2_eval_100k.md.")
     args = parser.parse_args()
+
+    try:
+        thresholds = tuple(float(x) for x in args.calib_thresholds.split(","))
+    except ValueError as exc:
+        raise SystemExit(f"--calib-thresholds must be three comma-separated floats: {exc}")
+    if len(thresholds) != 3:
+        raise SystemExit("--calib-thresholds needs exactly three values (t0,t1,t2)")
 
     d = load_dataset(args.data)
     baseline = np.asarray(d["baseline_scores"], dtype=np.float32)
@@ -288,6 +363,16 @@ def main() -> int:
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(metrics, indent=2))
+
+    if args.emit_calibration:
+        calib = build_calibration(metrics, thresholds)
+        args.emit_calibration.parent.mkdir(parents=True, exist_ok=True)
+        args.emit_calibration.write_text(json.dumps(calib, indent=2))
+        print(f"wrote calibration to {args.emit_calibration}: "
+              f"bucket_scale={calib['bucket_scale']} "
+              f"phase_scale={calib['phase_scale']}",
+              file=sys.stderr)
+
     print(json.dumps(metrics, indent=2))
     return 0
 
