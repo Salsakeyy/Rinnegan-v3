@@ -26,6 +26,13 @@ constexpr Piece makePiece(Color c, PieceType pt) {
 constexpr Color pieceColor(Piece p) { return Color(p >> 3); }
 constexpr PieceType pieceType(Piece p) { return PieceType(p & 7); }
 
+// Compact piece-index in [0, 12]. White pieces map to 0..5, black to 6..11,
+// NO_PIECE to 12. Used as a table index for continuation/capture history so
+// the natural Piece encoding's gap (6, 7, 14) doesn't waste rows.
+constexpr int pieceIdx(Piece p) {
+    return (p == NO_PIECE) ? 12 : (pieceColor(p) == WHITE ? int(p) : int(p) - 2);
+}
+
 enum Square : int {
     A1, B1, C1, D1, E1, F1, G1, H1,
     A2, B2, C2, D2, E2, F2, G2, H2,

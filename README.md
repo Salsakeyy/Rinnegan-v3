@@ -4,7 +4,7 @@ A UCI chess engine written in C++20. Bitboard-based with magic bitboards for
 sliding pieces, tapered PeSTO evaluation, and a modern search stack (PVS, LMR,
 null move, TT, killers/history/counter-moves, futility/LMP/RFP/razoring).
 
-Current CCRL candidate: **Rinnegan v5.3**.
+Current CCRL candidate: **Rinnegan v7**.
 
 Disclosure: Rinnegan is fully written by Claude and Codex as a proof of
 concept.
@@ -19,11 +19,77 @@ concept.
 | v4      | stronger than v3 | Lazy SMP and bench support |
 | v5.1    | development      | LTO/PGO build pipeline, OpenBench bench contract |
 | v5.2    | development      | SEE and SEE-based pruning in qsearch/main search |
-| **v5.3** | **CCRL candidate** | Improving flag, internal iterative reduction, graduated aspiration; +27.85 +/- 14.60 Elo vs v5.2 over 1000 games |
+| v5.3    | development      | Improving flag, internal iterative reduction, graduated aspiration; +27.85 +/- 14.60 Elo vs v5.2 over 1000 games |
+| v6      | development      | Policy network root-ordering integration (policy v2 calibration) |
+| **v7**  | **CCRL candidate** | Continuation/capture history, ProbCut, singular extensions, qsearch TT, TT-refined eval, history-driven LMR, expanded eval terms, lazy-SMP diversity, dynamic time |
 
 v2's 2089 Elo was anchored vs Stockfish (UCI_Elo 1320–2500, 3+0.05, 150 rounds/anchor,
 combined inverse-variance-weighted estimate). v3 is +438 Elo over that baseline at
 a slightly longer TC, putting it well into master strength (≥2300).
+
+---
+
+## v7 changelog
+
+v7 is a search + classical-eval rework. No NNUE.
+
+### Search (`src/search.cpp`, `src/thread.h`)
+
+- **Quiescence TT** — probe at qsearch entry and cut on TT_EXACT / bounded
+  TT hits; store qsearch results at depth 0 so subsequent visits skip the
+  capture loop entirely.
+- **TT-refined static eval** — when the TT hit's bound tightens the static
+  eval (lower/exact for fail-high, upper/exact for fail-low) the refined
+  value drives RFP, razoring, NMP, and futility. The raw static eval is
+  still recorded in `staticEvalStack` so `improving` stays consistent.
+- **ProbCut** — at non-PV non-check `depth ≥ 5`, generate captures, gate
+  with SEE on the `probcutBeta = beta + 200` margin, qsearch-verify, and
+  cut at `depth-4` when both verifications fail-high.
+- **Singular Extension** — at non-excluded nodes with `depth ≥ 8` and a
+  sufficiently-deep TT lower/exact bestmove, run a reduced-depth singular
+  test that excludes the TT move via per-ply `excludedMoveStack`. Extends
+  the TT move by 1 ply when singular; cuts on the multi-cut variant.
+- **Continuation history** — `int16_t contHist[13][64][13][64]` keyed by
+  (prevPiece, prevTo, curPiece, curTo). Contributes to quiet ordering and
+  to LMR's history adjustment. Bonus / malus mirror main history.
+- **Capture history** — `int16_t captHist[13][64][7]` keyed by
+  (moverPiece, toSq, capturedPT). Breaks MVV-LVA ties in capture ordering
+  (MVV-LVA is scaled ×100 so it remains primary) and feeds the LMR
+  adjustment for losing captures.
+- **LMR refinements** — captures with negative SEE now reduce too (less
+  aggressively); cut-node `&& !pv` bumps reduction by 1; history score
+  (main + cont) shifts reduction by up to ±2; killers reduce one less.
+- **Tuned RFP / razor / NMP** — RFP margin uses
+  `(improving ? 55 : 75) * d - 2 * improvement`, razor extends to depth ≤
+  4 with `350 + 300*d`, NMP `R = 3 + d/3 + min((eval-beta)/200, 3)`.
+- **Lazy-SMP skip pattern** — helper threads skip ID iterations on the
+  Stockfish-style `kSkipSize` / `kSkipPhase` cycle so workers explore
+  different depth slices; main thread always iterates linearly.
+- **Dynamic time management** — past depth 6 the soft limit scales by
+  `1 + 0.15 * bestMoveChanges (cap +60%)` and by `1.5 - bestMoveShare`
+  (clamped to `[0.5, 1.5]`); per-root-move node counters live on
+  `ThreadData` and are reset each iteration. Legacy `PolicyTimeMod` shave
+  is preserved.
+
+### Eval (`src/eval.cpp`)
+
+- **Backward pawns** (`-8 mg / -16 eg`), **connected / phalanx** bonus
+  scaled by relative rank, both stored in the pawn hash entry alongside
+  passed/isolated/doubled.
+- **Knight outposts** (`+25 / +12`) and **bishop outposts** (half),
+  gated on pawn-defended square + no enemy pawn on adjacent files ahead.
+- **Threats** — minor attacked by enemy pawn (`-30 / -20`), rook by
+  minor (`-25 / -20`), queen by rook/minor (`-50 / -30`). Computed in a
+  second pass after `evaluateSide` fills per-side attack bitboards.
+- **Safe-check king-safety** — each enemy attacker type contributes
+  `12 * attackerWeight[pt]` units per square from which it could check
+  the defender king and that the defender doesn't attack back.
+- **Mobility bump** — rook EG `4 → 5`, queen MG `1 → 2`.
+
+### UCI
+
+- `id name Rinnegan v7`.
+- New `BENCH_SIGNATURE = 2782066` (16 positions, depth 13).
 
 ---
 
